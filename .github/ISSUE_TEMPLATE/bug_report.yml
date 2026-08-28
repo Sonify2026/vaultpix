@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible VaultPix problem
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the result and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. Open…\n2. Choose…\n3. Paste…"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: VaultPix version
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Obsidian and operating system versions
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context
+      description: Remove AccessKey values and private URLs before attaching logs or screenshots.
+

@@ -1,0 +1,27 @@
+{
+  "name": "obsidian-vaultpix",
+  "version": "1.1.0",
+  "description": "Optimize, align, upload, migrate, and safely manage images in Obsidian.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run --pool=threads",
+    "check": "tsc --noEmit --skipLibCheck && vitest run --pool=threads",
+    "release:verify": "npm run build && npm test",
+    "test:watch": "vitest"
+  },
+  "keywords": ["obsidian", "images", "s3", "r2", "aliyun-oss", "image-upload"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "esbuild": "^0.25.5",
+    "obsidian": "latest",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.883.0"
+  }
+}
