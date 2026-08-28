@@ -28,4 +28,3 @@ For live development, run `npm run dev` and copy or link the project output into
 3. Run `npm run release:verify`.
 4. Confirm `main.js`, `manifest.json`, and `styles.css` contain no credentials.
 5. Commit, tag as `v<version>`, and push the tag.
-

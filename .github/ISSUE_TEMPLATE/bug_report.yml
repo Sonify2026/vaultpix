@@ -29,4 +29,3 @@ body:
     attributes:
       label: Additional context
       description: Remove AccessKey values and private URLs before attaching logs or screenshots.
-

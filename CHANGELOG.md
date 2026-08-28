@@ -23,4 +23,3 @@ All notable changes to VaultPix are documented here.
 ## 1.0.0 - 2026-08-28
 
 - Initial image processing, S3/R2 upload, safe Markdown replacement, migration, rollback, manifest, and recovery implementation.
-

@@ -21,4 +21,3 @@ VaultPix stores configured object-storage credentials in the current vault at `.
 ## Reporting a vulnerability
 
 Open a private GitHub security advisory for the repository. Do not include real credentials, private Vault content, or live private URLs. If a secret may have been exposed, revoke it before reporting the problem.
-
