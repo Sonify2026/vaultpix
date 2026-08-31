@@ -103,6 +103,7 @@ export interface TemplateContext {
   index: number;
   hash: string;
   now?: Date;
+  uuid?: string;
   frontmatter?: Record<string, unknown>;
 }
 

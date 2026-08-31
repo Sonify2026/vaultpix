@@ -5,6 +5,7 @@ import { Logger } from "./utils/logger";
 import { isImageName, mimeFromName } from "./utils/mime";
 import { MarkdownImageParser } from "./markdown/MarkdownImageParser";
 import { MarkdownReplacer } from "./markdown/MarkdownReplacer";
+import type { Replacement } from "./markdown/MarkdownReplacer";
 import { imageAlignmentReplacement } from "./markdown/ImageAlignment";
 import { ManifestStore } from "./manifest/ManifestStore";
 import { MigrationStore } from "./manifest/MigrationStore";
@@ -87,9 +88,9 @@ export default class VaultPixPlugin extends Plugin {
     this.addCommand({ id: "align-current-image-center", name: "当前图片：居中", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view, "center") });
     this.addCommand({ id: "align-current-image-right", name: "当前图片：居右", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view, "right") });
     this.addCommand({ id: "align-current-image-default", name: "当前图片：恢复默认对齐", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view) });
-    this.addCommand({ id: "process-current-note", name: "处理当前笔记中的全部图片", checkCallback: checking => { const note = this.app.workspace.getActiveFile(); if (!note) return false; if (!checking) void this.runMigration(note.path); return true; } });
+    this.addCommand({ id: "process-current-note", name: "按当前模式处理本笔记全部图片", checkCallback: checking => { const note = this.app.workspace.getActiveFile(); if (!note) return false; if (!checking) void (this.shouldUpload(note) ? this.runMigration(note.path) : this.optimizeLocalReferences(note.path)); return true; } });
     this.addCommand({ id: "scan-vault-images", name: "扫描整个库中的图片", callback: () => void this.scanVault() });
-    this.addCommand({ id: "migrate-vault-images", name: "迁移整个库中的图片", callback: () => void this.runMigration() });
+    this.addCommand({ id: "migrate-vault-images", name: "上传并迁移整个库中的图片", callback: () => void this.runMigration() });
     this.addCommand({ id: "open-image-manager", name: "打开图片管理器", callback: () => void this.openManager() });
     this.addCommand({ id: "test-uploader", name: "测试图床连接", callback: () => void this.testConnection() });
     this.addCommand({ id: "undo-last-migration", name: "撤销上一次图片迁移", callback: () => void this.undoMigration() });
@@ -111,7 +112,8 @@ export default class VaultPixPlugin extends Plugin {
   private registerContextMenus(): void {
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (!(file instanceof TFile) || !isImageName(file.name)) return;
-      menu.addItem(item => item.setTitle("优化并上传图片").setIcon("upload").onClick(() => void this.runFileMigration(file)));
+      const upload = this.settings.workMode === "automatic";
+      menu.addItem(item => item.setTitle(upload ? "优化并上传图片" : "优化、命名并更新引用").setIcon(upload ? "upload" : "image").onClick(() => void (upload ? this.runFileMigration(file) : this.optimizeLocalReferences(undefined, file.path))));
       menu.addItem(item => item.setTitle("复制 Markdown 图片链接").setIcon("copy").onClick(async () => {
         await navigator.clipboard.writeText(`![[${file.path}]]`); new Notice("已复制图片链接。");
       }));
@@ -124,20 +126,19 @@ export default class VaultPixPlugin extends Plugin {
     if (source === "拖拽" && !this.settings.autoProcessDrop) return;
     const note = view.file;
     if (!note) return;
-    if (this.app.metadataCache.getFileCache(note)?.frontmatter?.["image-upload"] === false) return;
     event.preventDefault();
     void this.processIncoming(files, editor, note, source);
   }
 
   private async processIncoming(files: File[], editor: Editor, note: TFile, source: string): Promise<void> {
     const links: string[] = [];
+    const upload = this.shouldUpload(note);
     for (let index = 0; index < files.length; index++) {
       const file = files[index];
       if (!file) continue;
       const fallbackName = file.name || `剪贴板-${Date.now()}-${index + 1}.png`;
       const input: ImageInput = { name: fallbackName, mimeType: file.type || mimeFromName(fallbackName), data: await file.arrayBuffer() };
       try {
-        const upload = this.settings.workMode === "automatic";
         const result = await this.pipeline.execute({ input, note, index: index + 1, upload });
         if (upload && result.uploadResult) {
           links.push(this.pipeline.markdownFor(result.uploadResult.url, fallbackName.replace(/\.[^.]+$/, "")));
@@ -197,6 +198,10 @@ export default class VaultPixPlugin extends Plugin {
     document.body.removeClass("iam-default-image-align-left", "iam-default-image-align-center", "iam-default-image-align-right");
   }
 
+  private shouldUpload(note: TFile): boolean {
+    return this.settings.workMode === "automatic" && this.app.metadataCache.getFileCache(note)?.frontmatter?.["image-upload"] !== false;
+  }
+
   private async processCurrentReference(note: TFile, image: TFile, reference: ImageReference, upload: boolean): Promise<void> {
     const before = await this.app.vault.read(note);
     try {
@@ -224,6 +229,70 @@ export default class VaultPixPlugin extends Plugin {
     const path = await this.app.fileManager.getAvailablePathForAttachment(input.name, note.path);
     const file = await this.app.vault.createBinary(path, input.data);
     return `!${this.app.fileManager.generateMarkdownLink(file, note.path)}`;
+  }
+
+  private async optimizeLocalReferences(notePath?: string, imagePath?: string): Promise<void> {
+    const notice = new Notice(notePath ? "正在本地处理当前笔记的图片…" : "正在本地处理图片…", 0);
+    const createdFiles: TFile[] = [];
+    const noteBackups = new Map<string, string>();
+    try {
+      const report = await this.scanner.scan(false);
+      const assets = [...report.assets.values()]
+        .filter(asset => !imagePath || asset.localPath === imagePath)
+        .map(asset => ({ ...asset, references: asset.references.filter(reference => !notePath || reference.notePath === notePath) }))
+        .filter(asset => asset.references.length > 0);
+      if (!assets.length) { notice.hide(); new Notice("没有找到需要本地处理的图片引用。"); return; }
+
+      const replacementsByNote = new Map<string, Replacement[]>();
+      for (let index = 0; index < assets.length; index++) {
+        const asset = assets[index];
+        if (!asset) continue;
+        const source = this.app.vault.getAbstractFileByPath(asset.localPath);
+        const contextNotePath = asset.references[0]?.notePath;
+        const contextNote = contextNotePath ? this.app.vault.getAbstractFileByPath(contextNotePath) : undefined;
+        if (!(source instanceof TFile) || !(contextNote instanceof TFile)) continue;
+        notice.setMessage(`正在优化 ${index + 1}/${assets.length}：${source.name}`);
+        const input: ImageInput = { name: source.name, mimeType: mimeFromName(source.name), data: await this.app.vault.readBinary(source) };
+        const result = await this.pipeline.execute({ input, note: contextNote, sourceFile: source, index: index + 1, upload: false });
+        const outputPath = await this.app.fileManager.getAvailablePathForAttachment(result.filename, contextNote.path);
+        const output = await this.app.vault.createBinary(outputPath, result.processed.data);
+        createdFiles.push(output);
+
+        for (const reference of asset.references) {
+          const note = this.app.vault.getAbstractFileByPath(reference.notePath);
+          if (!(note instanceof TFile)) continue;
+          const alias = reference.displayWidth ? String(Math.round(reference.displayWidth)) : reference.alt || undefined;
+          const replacement = `!${this.app.fileManager.generateMarkdownLink(output, note.path, undefined, alias)}`;
+          replacementsByNote.set(reference.notePath, [...(replacementsByNote.get(reference.notePath) ?? []), {
+            start: reference.start, end: reference.end, expected: reference.rawLink, replacement
+          }]);
+        }
+      }
+
+      for (const [path, replacements] of replacementsByNote) {
+        const note = this.app.vault.getAbstractFileByPath(path);
+        if (!(note instanceof TFile)) continue;
+        const before = await this.app.vault.read(note);
+        noteBackups.set(path, before);
+        const after = new MarkdownReplacer().apply(before, replacements);
+        await this.app.vault.modify(note, after);
+        if (await this.app.vault.read(note) !== after) throw new Error(`写入后校验失败：${path}`);
+      }
+
+      notice.hide();
+      const referenceCount = [...replacementsByNote.values()].reduce((sum, replacements) => sum + replacements.length, 0);
+      new Notice(`本地处理完成：优化并命名 ${createdFiles.length} 张图片，更新 ${referenceCount} 处引用。原图片已保留。`, 8000);
+    } catch (error) {
+      for (const [path, content] of noteBackups) {
+        const note = this.app.vault.getAbstractFileByPath(path);
+        if (note instanceof TFile) await this.app.vault.modify(note, content);
+      }
+      for (const file of createdFiles) {
+        if (this.app.vault.getAbstractFileByPath(file.path) instanceof TFile) await this.app.vault.delete(file);
+      }
+      notice.hide();
+      new Notice(`本地处理失败：${errorMessage(error)}\n笔记已恢复，未留下不完整的新图片。`, 12000);
+    }
   }
 
   private async scanVault(): Promise<void> {

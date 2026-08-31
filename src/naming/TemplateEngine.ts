@@ -20,7 +20,7 @@ export class TemplateEngine {
       ss: pad(now.getSeconds()),
       timestamp: String(now.getTime()),
       index: pad(context.index, 3),
-      uuid: crypto.randomUUID(),
+      uuid: context.uuid ?? crypto.randomUUID(),
       hash: context.hash
     };
 

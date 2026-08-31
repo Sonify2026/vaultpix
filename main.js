@@ -4488,7 +4488,7 @@ var import_obsidian7 = require("obsidian");
 // src/settings.ts
 var DEFAULT_SETTINGS = {
   enabled: true,
-  workMode: "automatic",
+  workMode: "semi-automatic",
   autoProcessPaste: true,
   autoProcessDrop: true,
   image: {
@@ -4916,27 +4916,75 @@ function errorMessage(error) {
 }
 
 // src/core/image/BrowserImageProcessor.ts
+function calculateImageGeometry(width, height, settings) {
+  const identity = { canvasWidth: width, canvasHeight: height, sx: 0, sy: 0, sw: width, sh: height };
+  if (settings.resizeMode === "none") return identity;
+  let targetWidth = width;
+  let targetHeight = height;
+  if (settings.resizeMode === "width") targetWidth = settings.resizeWidth;
+  if (settings.resizeMode === "height") targetHeight = settings.resizeHeight;
+  if (settings.resizeMode === "long-edge") {
+    const scale2 = settings.longEdge / Math.max(width, height);
+    targetWidth = width * scale2;
+    targetHeight = height * scale2;
+  } else if (settings.resizeMode === "short-edge") {
+    const scale2 = settings.shortEdge / Math.min(width, height);
+    targetWidth = width * scale2;
+    targetHeight = height * scale2;
+  } else if (settings.resizeMode === "width") {
+    targetHeight = height * (targetWidth / width);
+  } else if (settings.resizeMode === "height") {
+    targetWidth = width * (targetHeight / height);
+  } else if (settings.resizeMode === "fit") {
+    const scale2 = Math.min(settings.resizeWidth / width, settings.resizeHeight / height);
+    targetWidth = width * scale2;
+    targetHeight = height * scale2;
+  } else if (settings.resizeMode === "fill" || settings.resizeMode === "fixed") {
+    const canvasWidth = settings.resizeWidth;
+    const canvasHeight = settings.resizeHeight;
+    const scale2 = Math.max(canvasWidth / width, canvasHeight / height);
+    if (settings.preventUpscale && scale2 > 1) return identity;
+    const sourceRatio = width / height;
+    const targetRatio = canvasWidth / canvasHeight;
+    let sw = width, sh = height, sx = 0, sy = 0;
+    if (sourceRatio > targetRatio) {
+      sw = height * targetRatio;
+      sx = (width - sw) / 2;
+    } else {
+      sh = width / targetRatio;
+      sy = (height - sh) / 2;
+    }
+    return { canvasWidth, canvasHeight, sx, sy, sw, sh };
+  }
+  const scale = Math.min(targetWidth / width, targetHeight / height);
+  if (settings.preventUpscale && scale >= 1) return identity;
+  return { ...identity, canvasWidth: Math.max(1, Math.round(targetWidth)), canvasHeight: Math.max(1, Math.round(targetHeight)) };
+}
 var BrowserImageProcessor = class {
   async process(input, settings) {
     if (!input.data.byteLength || !input.mimeType.startsWith("image/")) {
       throw new ImageAssetError("INVALID_IMAGE" /* INVALID_IMAGE */, `\u201C${input.name}\u201D\u4E0D\u662F\u6709\u6548\u56FE\u7247\u3002`);
     }
     const inputExtension = extensionOf(input.name);
-    const preserve = settings.outputFormat === "original" || inputExtension === "gif" && settings.preserveGif || inputExtension === "svg" && settings.preserveSvg;
+    const preserve = settings.outputFormat === "original" || (inputExtension === "gif" || input.mimeType === "image/gif") && settings.preserveGif || (inputExtension === "svg" || input.mimeType === "image/svg+xml") && settings.preserveSvg;
     if (preserve) {
       const dimensions = await this.readDimensions(input).catch(() => ({ width: 0, height: 0 }));
       return this.finish(input.data.slice(0), input.mimeType, dimensions.width, dimensions.height, input.data.byteLength);
     }
     const bitmap = await this.decode(input);
     try {
-      const geometry = this.calculateGeometry(bitmap.width, bitmap.height, settings);
+      const geometry = calculateImageGeometry(bitmap.width, bitmap.height, settings);
       const canvas = document.createElement("canvas");
       canvas.width = geometry.canvasWidth;
       canvas.height = geometry.canvasHeight;
       const context = canvas.getContext("2d", { alpha: true });
       if (!context) throw new ImageAssetError("ENCODE_FAILED" /* ENCODE_FAILED */, "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u521B\u5EFA\u56FE\u7247\u753B\u5E03\u3002");
-      context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const mimeType = this.outputMime(settings.outputFormat);
+      if (mimeType === "image/jpeg") {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, geometry.canvasWidth, geometry.canvasHeight);
+      }
+      context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const quality = this.quality(settings);
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
       if (!blob || settings.outputFormat === "avif" && blob.type !== "image/avif") {
@@ -4985,49 +5033,6 @@ var BrowserImageProcessor = class {
     if (settings.outputFormat === "avif") return settings.avifQuality / 100;
     return settings.webpQuality / 100;
   }
-  calculateGeometry(width, height, settings) {
-    const identity = { canvasWidth: width, canvasHeight: height, sx: 0, sy: 0, sw: width, sh: height };
-    if (settings.resizeMode === "none") return identity;
-    let targetWidth = width;
-    let targetHeight = height;
-    if (settings.resizeMode === "width") targetWidth = settings.resizeWidth;
-    if (settings.resizeMode === "height") targetHeight = settings.resizeHeight;
-    if (settings.resizeMode === "long-edge") {
-      const scale2 = settings.longEdge / Math.max(width, height);
-      targetWidth = width * scale2;
-      targetHeight = height * scale2;
-    } else if (settings.resizeMode === "short-edge") {
-      const scale2 = settings.shortEdge / Math.min(width, height);
-      targetWidth = width * scale2;
-      targetHeight = height * scale2;
-    } else if (settings.resizeMode === "width") {
-      targetHeight = height * (targetWidth / width);
-    } else if (settings.resizeMode === "height") {
-      targetWidth = width * (targetHeight / height);
-    } else if (settings.resizeMode === "fit") {
-      const scale2 = Math.min(settings.resizeWidth / width, settings.resizeHeight / height);
-      targetWidth = width * scale2;
-      targetHeight = height * scale2;
-    } else if (settings.resizeMode === "fill" || settings.resizeMode === "fixed") {
-      const canvasWidth = settings.resizeWidth;
-      const canvasHeight = settings.resizeHeight;
-      const sourceRatio = width / height;
-      const targetRatio = canvasWidth / canvasHeight;
-      let sw = width, sh = height, sx = 0, sy = 0;
-      if (sourceRatio > targetRatio) {
-        sw = height * targetRatio;
-        sx = (width - sw) / 2;
-      } else {
-        sh = width / targetRatio;
-        sy = (height - sh) / 2;
-      }
-      if (settings.preventUpscale && canvasWidth > width && canvasHeight > height) return identity;
-      return { canvasWidth, canvasHeight, sx, sy, sw, sh };
-    }
-    const scale = Math.min(targetWidth / width, targetHeight / height);
-    if (settings.preventUpscale && scale >= 1) return identity;
-    return { ...identity, canvasWidth: Math.max(1, Math.round(targetWidth)), canvasHeight: Math.max(1, Math.round(targetHeight)) };
-  }
 };
 
 // src/naming/TemplateEngine.ts
@@ -5051,7 +5056,7 @@ var TemplateEngine = class {
       ss: pad(now.getSeconds()),
       timestamp: String(now.getTime()),
       index: pad(context.index, 3),
-      uuid: crypto.randomUUID(),
+      uuid: context.uuid ?? crypto.randomUUID(),
       hash: context.hash
     };
     const rendered = template.replace(/\{(frontmatter:([^}]+)|hash(?::(\d+))?|[A-Za-z]+)\}/g, (_match, token, frontmatterKey, hashLength) => {
@@ -19904,6 +19909,8 @@ var ImagePipeline = class {
       notePath,
       index,
       hash,
+      now: /* @__PURE__ */ new Date(),
+      uuid: crypto.randomUUID(),
       frontmatter
     };
   }
@@ -20255,6 +20262,7 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  templates = new TemplateEngine();
   display() {
     this.containerEl.empty();
     this.containerEl.addClass("iam-settings");
@@ -20277,19 +20285,21 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     (0, import_obsidian4.setIcon)(mark, "images");
     const copy = header.createDiv({ cls: "iam-settings-hero__copy" });
     copy.createEl("h2", { text: "VaultPix \xB7 \u4E91\u56FE\u5323" });
-    copy.createEl("p", { text: "\u8BA9\u56FE\u7247\u4ECE\u7C98\u8D34\u3001\u4F18\u5316\u3001\u4E0A\u4F20\u5230\u5907\u4EFD\u59CB\u7EC8\u6E05\u6670\u53EF\u63A7\u3002\u5B8C\u6210\u4E0B\u65B9\u4E09\u6B65\uFF0C\u5373\u53EF\u5F00\u59CB\u4F7F\u7528\u3002" });
+    copy.createEl("p", { text: "\u53EA\u5728\u672C\u5730\u4F18\u5316\u4E0E\u547D\u540D\uFF0C\u6216\u8FDE\u63A5\u4E91\u7AEF\u81EA\u52A8\u4E0A\u4F20\u2014\u2014\u4E24\u79CD\u65B9\u5F0F\u90FD\u53EF\u4EE5\u72EC\u7ACB\u3001\u5B89\u9759\u5730\u4F7F\u7528\u3002" });
   }
   renderSetupGuide() {
+    const usesUpload = this.usesUpload();
+    const manual = this.plugin.settings.workMode === "manual";
     const guide = this.containerEl.createDiv({ cls: "iam-setup-guide" });
     const top = guide.createDiv({ cls: "iam-setup-guide__top" });
     const copy = top.createDiv();
     copy.createEl("h3", { text: "\u5F00\u59CB\u524D\u68C0\u67E5" });
-    copy.createEl("p", { text: "\u7EA6 3 \u5206\u949F\u3002\u719F\u6089 S3/R2 \u7684\u7528\u6237\u53EF\u4EE5\u76F4\u63A5\u5C55\u5F00\u5BF9\u5E94\u5206\u7C7B\u3002" });
+    copy.createEl("p", { text: usesUpload ? "\u4E91\u7AEF\u6A21\u5F0F\u9700\u8981\u5B8C\u6210\u670D\u52A1\u914D\u7F6E\uFF1B\u7B2C\u4E00\u6B21\u4F7F\u7528\u7EA6 3 \u5206\u949F\u3002" : manual ? "\u6309\u9700\u6A21\u5F0F\u4E0D\u4F1A\u63A5\u7BA1\u7C98\u8D34\u6216\u62D6\u62FD\uFF0C\u53EA\u5728\u4F60\u8FD0\u884C\u547D\u4EE4\u65F6\u5904\u7406\u3002" : "\u672C\u5730\u6A21\u5F0F\u65E0\u9700\u914D\u7F6E\u4E0A\u4F20\u670D\u52A1\uFF0C\u4E5F\u4E0D\u4F1A\u663E\u793A\u4E0A\u4F20\u63D0\u9192\u3002" });
     const status = top.createSpan({ cls: "iam-status-badge" });
     const steps = guide.createEl("ol", { cls: "iam-setup-steps" });
-    const behaviorStep = this.setupStep(steps, "\u9009\u62E9\u5DE5\u4F5C\u65B9\u5F0F", "\u51B3\u5B9A\u7C98\u8D34\u56FE\u7247\u540E\u662F\u5426\u81EA\u52A8\u4E0A\u4F20");
-    const providerStep = this.setupStep(steps, "\u586B\u5199\u4E0A\u4F20\u670D\u52A1", "\u914D\u7F6E Bucket\u3001\u5BC6\u94A5\u548C\u516C\u5F00\u57DF\u540D");
-    const testStep = this.setupStep(steps, "\u6D4B\u8BD5\u771F\u5B9E\u8FDE\u63A5", "\u786E\u8BA4 Bucket \u6743\u9650\uFF1B\u9996\u6B21\u4E0A\u4F20\u518D\u9A8C\u8BC1\u516C\u5F00\u5730\u5740");
+    const behaviorStep = this.setupStep(steps, "\u9009\u62E9\u5DE5\u4F5C\u65B9\u5F0F", usesUpload ? "\u4F18\u5316\u3001\u547D\u540D\u540E\u4E0A\u4F20\u5230\u4E91\u7AEF" : manual ? "\u4EC5\u5728\u8FD0\u884C\u547D\u4EE4\u65F6\u5904\u7406" : "\u4F18\u5316\u3001\u547D\u540D\u540E\u4FDD\u5B58\u5230\u672C\u5730");
+    const providerStep = this.setupStep(steps, usesUpload ? "\u586B\u5199\u4E0A\u4F20\u670D\u52A1" : "\u8BBE\u7F6E\u56FE\u7247\u4F18\u5316", usesUpload ? "\u914D\u7F6E Bucket\u3001\u5BC6\u94A5\u548C\u516C\u5F00\u57DF\u540D" : "\u9009\u62E9\u683C\u5F0F\u3001\u753B\u8D28\u548C\u76EE\u6807\u5C3A\u5BF8");
+    const testStep = this.setupStep(steps, usesUpload ? "\u6D4B\u8BD5\u771F\u5B9E\u8FDE\u63A5" : "\u8BBE\u7F6E\u6587\u4EF6\u547D\u540D", usesUpload ? "\u786E\u8BA4 Bucket \u6743\u9650\uFF1B\u9996\u6B21\u4E0A\u4F20\u518D\u9A8C\u8BC1\u516C\u5F00\u5730\u5740" : "\u6309\u6A21\u677F\u751F\u6210\u6E05\u6670\u3001\u4E00\u81F4\u7684\u6587\u4EF6\u540D");
     const summary = guide.createDiv({ cls: "iam-workflow-summary" });
     const summaryIcon = summary.createSpan();
     (0, import_obsidian4.setIcon)(summaryIcon, "workflow");
@@ -20298,15 +20308,15 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
       const missing = this.missingUploaderFields();
       const tested = this.currentConnectionTest();
       behaviorStep.toggleClass("is-complete", true);
-      providerStep.toggleClass("is-complete", missing.length === 0);
-      testStep.toggleClass("is-complete", tested?.success === true);
+      providerStep.toggleClass("is-complete", !usesUpload || missing.length === 0);
+      testStep.toggleClass("is-complete", !usesUpload || tested?.success === true);
       status.removeClass("is-ready", "is-warning", "is-error");
       if (!this.plugin.settings.enabled) {
         status.addClass("is-warning");
         status.setText("\u63D2\u4EF6\u5DF2\u505C\u7528");
-      } else if (this.plugin.settings.workMode !== "automatic" && missing.length) {
+      } else if (!usesUpload) {
         status.addClass("is-ready");
-        status.setText("\u672C\u5730\u5904\u7406\u5DF2\u5C31\u7EEA");
+        status.setText(manual ? "\u6309\u9700\u5904\u7406\u5DF2\u5C31\u7EEA" : "\u672C\u5730\u5904\u7406\u5DF2\u5C31\u7EEA");
       } else if (missing.length) {
         status.addClass("is-warning");
         status.setText(`\u8FD8\u9700\u586B\u5199 ${missing.length} \u9879`);
@@ -20320,9 +20330,9 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
         status.addClass("is-error");
         status.setText("\u8FDE\u63A5\u6D4B\u8BD5\u5931\u8D25");
       }
-      const mode = this.plugin.settings.workMode === "automatic" ? "\u81EA\u52A8\u5904\u7406\u5E76\u4E0A\u4F20" : this.plugin.settings.workMode === "semi-automatic" ? "\u81EA\u52A8\u4F18\u5316\u3001\u624B\u52A8\u4E0A\u4F20" : "\u4EC5\u5728\u6267\u884C\u547D\u4EE4\u65F6\u5904\u7406";
+      const mode = this.plugin.settings.workMode === "automatic" ? "\u4E91\u7AEF\uFF1A\u4F18\u5316\u3001\u547D\u540D\u5E76\u4E0A\u4F20" : this.plugin.settings.workMode === "semi-automatic" ? "\u672C\u5730\uFF1A\u4EC5\u4F18\u5316\u4E0E\u547D\u540D" : "\u6309\u9700\uFF1A\u4EC5\u8FD0\u884C\u547D\u4EE4";
       const resize = this.plugin.settings.image.resizeMode === "long-edge" ? `\u6700\u957F\u8FB9 ${this.plugin.settings.image.longEdge}px` : this.resizeModeLabel(this.plugin.settings.image.resizeMode);
-      summaryText.setText(`\u5F53\u524D\u6D41\u7A0B\uFF1A${mode} \xB7 ${this.plugin.settings.image.outputFormat.toUpperCase()} \xB7 ${resize} \xB7 ${this.providerLabel()}`);
+      summaryText.setText(`\u5F53\u524D\u6D41\u7A0B\uFF1A${mode} \xB7 ${this.plugin.settings.image.outputFormat.toUpperCase()} \xB7 ${resize}${usesUpload ? ` \xB7 ${this.providerLabel()}` : " \xB7 Obsidian \u672C\u5730\u9644\u4EF6"}`);
     };
     update();
     return update;
@@ -20336,10 +20346,9 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     let pasteToggle;
     let dropToggle;
     let updateAutomationState = () => void 0;
-    new import_obsidian4.Setting(content).setName("\u5DE5\u4F5C\u6A21\u5F0F").setDesc("\u63A8\u8350\u201C\u81EA\u52A8\u201D\uFF1A\u4E0A\u4F20\u5E76\u9A8C\u8BC1\u6210\u529F\u540E\u624D\u66FF\u6362\u7B14\u8BB0\u94FE\u63A5\uFF1B\u4EFB\u4F55\u5931\u8D25\u90FD\u4F1A\u4FDD\u7559\u672C\u5730\u56FE\u7247\u3002").addDropdown((dropdown) => dropdown.addOptions({ automatic: "\u81EA\u52A8\uFF1A\u4F18\u5316\u5E76\u4E0A\u4F20", "semi-automatic": "\u534A\u81EA\u52A8\uFF1A\u4EC5\u4F18\u5316\u5230\u672C\u5730", manual: "\u624B\u52A8\uFF1A\u4EC5\u54CD\u5E94\u547D\u4EE4" }).setValue(this.plugin.settings.workMode).onChange(async (value) => {
+    new import_obsidian4.Setting(content).setName("\u56FE\u7247\u5904\u7406\u65B9\u5F0F").setDesc("\u63A8\u8350\u672C\u5730\u6A21\u5F0F\uFF1A\u65E0\u9700\u56FE\u5E8A\uFF0C\u53EA\u505A\u56FE\u7247\u4F18\u5316\u548C\u547D\u540D\u3002\u9700\u8981\u8FDC\u7A0B\u94FE\u63A5\u65F6\u518D\u5207\u6362\u5230\u4E91\u7AEF\u6A21\u5F0F\u3002").addDropdown((dropdown) => dropdown.addOptions({ "semi-automatic": "\u672C\u5730\u6A21\u5F0F\uFF1A\u4EC5\u4F18\u5316\u4E0E\u547D\u540D\uFF08\u63A8\u8350\uFF09", automatic: "\u4E91\u7AEF\u6A21\u5F0F\uFF1A\u4F18\u5316\u3001\u547D\u540D\u5E76\u4E0A\u4F20", manual: "\u6309\u9700\u6A21\u5F0F\uFF1A\u4EC5\u8FD0\u884C\u547D\u4EE4" }).setValue(this.plugin.settings.workMode).onChange(async (value) => {
       await this.persist((s2) => s2.workMode = value);
-      updateAutomationState();
-      refreshSetup();
+      this.display();
     }));
     const pasteSetting = new import_obsidian4.Setting(content).setName("\u5904\u7406\u7C98\u8D34\u56FE\u7247").setDesc("\u4ECE\u526A\u8D34\u677F\u7C98\u8D34\u56FE\u7247\u65F6\u6267\u884C\u5F53\u524D\u5DE5\u4F5C\u6A21\u5F0F\u3002\u5931\u8D25\u65F6\u4F1A\u81EA\u52A8\u4FDD\u7559\u4E3A\u672C\u5730\u9644\u4EF6\u3002").addToggle((toggle) => {
       pasteToggle = toggle;
@@ -20359,10 +20368,11 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     updateAutomationState();
   }
   renderUploader(refreshSetup) {
+    const usesUpload = this.usesUpload();
     const missing = this.missingUploaderFields();
     const tested = this.currentConnectionTest();
     const needsUploadSetup = this.plugin.settings.workMode === "automatic" && (missing.length > 0 || tested?.success !== true);
-    const content = this.section("\u4E0A\u4F20\u670D\u52A1", "\u8FDE\u63A5 Cloudflare R2\u3001\u963F\u91CC\u4E91 OSS \u6216\u5176\u4ED6 S3 \u517C\u5BB9\u5BF9\u8C61\u5B58\u50A8\u3002\u81EA\u52A8\u6A21\u5F0F\u5FC5\u987B\u5B8C\u6210\u8FD9\u91CC\u3002", "cloud-upload", needsUploadSetup, tested?.success ? "\u8FDE\u63A5\u6B63\u5E38" : missing.length ? `\u7F3A\u5C11 ${missing.length} \u9879` : "\u5F85\u6D4B\u8BD5");
+    const content = this.section("\u4E0A\u4F20\u670D\u52A1", usesUpload ? "\u8FDE\u63A5 Cloudflare R2\u3001\u963F\u91CC\u4E91 OSS \u6216\u5176\u4ED6 S3 \u517C\u5BB9\u5BF9\u8C61\u5B58\u50A8\u3002" : "\u53EF\u9009\u529F\u80FD\u3002\u5F53\u524D\u6A21\u5F0F\u53EA\u5728\u672C\u5730\u4F18\u5316\u548C\u547D\u540D\uFF0C\u4E0D\u68C0\u67E5\u51ED\u636E\uFF0C\u4E5F\u4E0D\u4F1A\u63D0\u9192\u914D\u7F6E\u3002", "cloud-upload", needsUploadSetup, !usesUpload ? "\u5F53\u524D\u672A\u4F7F\u7528" : tested?.success ? "\u8FDE\u63A5\u6B63\u5E38" : missing.length ? `\u7F3A\u5C11 ${missing.length} \u9879` : "\u5F85\u6D4B\u8BD5");
     const connectionState = content.createDiv({ cls: "iam-connection-state" });
     const connectionIcon = connectionState.createSpan({ cls: "iam-connection-state__icon" });
     const connectionCopy = connectionState.createDiv();
@@ -20371,9 +20381,15 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     const refreshConnectionState = () => {
       const fields = this.missingUploaderFields();
       const result = this.currentConnectionTest();
-      connectionState.removeClass("is-ready", "is-warning", "is-error");
+      connectionState.removeClass("is-ready", "is-warning", "is-error", "is-idle");
       connectionIcon.empty();
-      if (fields.length) {
+      if (!usesUpload) {
+        connectionState.addClass("is-idle");
+        (0, import_obsidian4.setIcon)(connectionIcon, "cloud-off");
+        connectionTitle.setText("\u5F53\u524D\u4E0D\u4F1A\u4E0A\u4F20\u56FE\u7247");
+        connectionDescription.setText("\u5F53\u524D\u6A21\u5F0F\u53EA\u4F18\u5316\u683C\u5F0F\u3001\u5C3A\u5BF8\u548C\u6587\u4EF6\u540D\u3002\u8FD9\u91CC\u53EF\u4EE5\u4FDD\u6301\u7A7A\u767D\uFF0C\u9700\u8981\u4E91\u7AEF\u94FE\u63A5\u65F6\u518D\u914D\u7F6E\u3002");
+        this.updateSectionMeta(content, "\u5F53\u524D\u672A\u4F7F\u7528");
+      } else if (fields.length) {
         connectionState.addClass("is-warning");
         (0, import_obsidian4.setIcon)(connectionIcon, "circle-alert");
         connectionTitle.setText("\u914D\u7F6E\u5C1A\u672A\u5B8C\u6210");
@@ -20516,41 +20532,58 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     updateResizeRows();
   }
   renderNaming() {
-    const content = this.section("\u547D\u540D\u4E0E\u8FDC\u7A0B\u76EE\u5F55", "\u5B9A\u4E49\u6700\u7EC8\u6587\u4EF6\u540D\u548C\u5BF9\u8C61\u5B58\u50A8\u4E2D\u7684\u76EE\u5F55\u7ED3\u6784\u3002\u4FEE\u6539\u524D\u5148\u67E5\u770B\u5B9E\u65F6\u793A\u4F8B\u3002", "folder-tree", false, "\u4F7F\u7528\u6A21\u677F");
+    const usesUpload = this.usesUpload();
+    const content = this.section("\u547D\u540D\u4E0E\u76EE\u5F55", usesUpload ? "\u5B9A\u4E49\u6700\u7EC8\u6587\u4EF6\u540D\u548C\u5BF9\u8C61\u5B58\u50A8\u4E2D\u7684\u76EE\u5F55\u7ED3\u6784\uFF1B\u9884\u89C8\u4E0E\u5B9E\u9645\u5904\u7406\u4F7F\u7528\u540C\u4E00\u5957\u6A21\u677F\u5F15\u64CE\u3002" : "\u5B9A\u4E49\u4F18\u5316\u540E\u4FDD\u5B58\u5230 Obsidian \u7684\u6587\u4EF6\u540D\uFF1B\u672C\u5730\u6A21\u5F0F\u4E0D\u4F1A\u4F7F\u7528\u8FDC\u7A0B\u76EE\u5F55\u3002", "folder-tree", false, usesUpload ? "\u4E91\u7AEF\u6A21\u677F" : "\u672C\u5730\u547D\u540D");
     const preview = content.createDiv({ cls: "iam-template-preview" });
     preview.createEl("strong", { text: "\u5B9E\u65F6\u793A\u4F8B" });
     const filenamePreview = preview.createEl("code");
     const pathPreview = preview.createEl("code");
+    let updateHashLength = () => void 0;
     const updatePreview = () => {
-      const date2 = /* @__PURE__ */ new Date();
-      const values = { noteName: "\u9879\u76EE\u590D\u76D8", fileName: "\u622A\u56FE", folderName: "\u5DE5\u4F5C", vaultName: this.app.vault.getName(), notePath: "\u5DE5\u4F5C/\u9879\u76EE\u590D\u76D8", YYYY: String(date2.getFullYear()), MM: String(date2.getMonth() + 1).padStart(2, "0"), DD: String(date2.getDate()).padStart(2, "0"), HH: "09", mm: "30", ss: "00", timestamp: String(date2.getTime()), index: "001", uuid: "a1b2c3d4", hash: "9f31a2bc410e" };
-      const render = (template) => template.replace(/\{(hash(?::\d+)?|[^}]+)\}/g, (_match, token) => {
-        if (token.startsWith("hash:")) return values.hash?.slice(0, Number(token.split(":")[1])) ?? "";
-        if (token.startsWith("frontmatter:")) return "\u5206\u7C7B";
-        return values[token] ?? `{${token}}`;
-      });
-      const extension = this.plugin.settings.image.outputFormat === "original" ? "\u539F\u6269\u5C55\u540D" : this.plugin.settings.image.outputFormat;
-      const filename = `${render(this.plugin.settings.naming.filenameTemplate)}.${extension}`;
+      const context = {
+        noteName: "\u9879\u76EE\u590D\u76D8",
+        fileName: "\u622A\u56FE",
+        folderName: "\u5DE5\u4F5C",
+        vaultName: this.app.vault.getName(),
+        notePath: "\u5DE5\u4F5C/\u9879\u76EE\u590D\u76D8.md",
+        index: 1,
+        hash: "9f31a2bc410e7d58",
+        now: new Date(2026, 7, 31, 9, 30, 0),
+        uuid: "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
+        frontmatter: { category: "\u8BBE\u8BA1" }
+      };
+      const extension = this.plugin.settings.image.outputFormat === "original" ? "png" : this.plugin.settings.image.outputFormat;
+      const filename = `${this.templates.render(this.plugin.settings.naming.filenameTemplate, context, false, this.plugin.settings.naming.unicodeFilenames)}.${extension}`;
       filenamePreview.setText(`\u6587\u4EF6\u540D  ${filename}`);
-      pathPreview.setText(`\u8FDC\u7A0B\u8DEF\u5F84  ${this.plugin.settings.uploader.pathPrefix ? `${this.plugin.settings.uploader.pathPrefix}/` : ""}${render(this.plugin.settings.naming.remotePathTemplate)}/${filename}`);
+      if (usesUpload) {
+        const folder = this.templates.render(this.plugin.settings.naming.remotePathTemplate, context, true, this.plugin.settings.naming.unicodeFilenames);
+        pathPreview.setText(`\u8FDC\u7A0B\u8DEF\u5F84  ${joinVaultPath(this.plugin.settings.uploader.pathPrefix, folder, filename)}`);
+      } else pathPreview.setText(`\u4FDD\u5B58\u7ED3\u679C  Obsidian \u9644\u4EF6\u76EE\u5F55/${filename}`);
     };
-    this.text(content, "\u6587\u4EF6\u540D\u6A21\u677F", "\u63A7\u5236\u6700\u7EC8\u56FE\u7247\u6587\u4EF6\u540D\u3002\u65E0\u9700\u586B\u5199\u6269\u5C55\u540D\uFF0C\u63D2\u4EF6\u4F1A\u81EA\u52A8\u6DFB\u52A0\u3002", this.plugin.settings.naming.filenameTemplate, "{noteName}-{index}", (value) => this.persist((s2) => s2.naming.filenameTemplate = value, updatePreview));
-    this.text(content, "\u8FDC\u7A0B\u76EE\u5F55\u6A21\u677F", "\u63A7\u5236 Bucket \u5185\u7684\u76EE\u5F55\u5C42\u7EA7\uFF1B\u8DEF\u5F84\u524D\u7F00\u4F1A\u81EA\u52A8\u653E\u5728\u5B83\u524D\u9762\u3002", this.plugin.settings.naming.remotePathTemplate, "obsidian/{YYYY}/{MM}/{noteName}", (value) => this.persist((s2) => s2.naming.remotePathTemplate = value, updatePreview));
+    const refreshNamingPreview = () => {
+      updatePreview();
+      updateHashLength();
+    };
+    this.text(content, "\u6587\u4EF6\u540D\u6A21\u677F", "\u63A7\u5236\u6700\u7EC8\u56FE\u7247\u6587\u4EF6\u540D\u3002\u65E0\u9700\u586B\u5199\u6269\u5C55\u540D\uFF0C\u63D2\u4EF6\u4F1A\u81EA\u52A8\u6DFB\u52A0\u3002", this.plugin.settings.naming.filenameTemplate, "{noteName}-{index}", (value) => this.persist((s2) => s2.naming.filenameTemplate = value, refreshNamingPreview));
+    if (usesUpload) this.text(content, "\u8FDC\u7A0B\u76EE\u5F55\u6A21\u677F", "\u53EA\u7528\u4E8E\u4E91\u7AEF\u4E0A\u4F20\u3002\u63A7\u5236 Bucket \u5185\u7684\u76EE\u5F55\u5C42\u7EA7\uFF1B\u8DEF\u5F84\u524D\u7F00\u4F1A\u81EA\u52A8\u653E\u5728\u5B83\u524D\u9762\u3002", this.plugin.settings.naming.remotePathTemplate, "obsidian/{YYYY}/{MM}/{noteName}", (value) => this.persist((s2) => s2.naming.remotePathTemplate = value, refreshNamingPreview));
     const help = content.createEl("details", { cls: "iam-inline-help" });
     const summary = help.createEl("summary");
     const helpIcon = summary.createSpan();
     (0, import_obsidian4.setIcon)(helpIcon, "braces");
     summary.createSpan({ text: "\u67E5\u770B\u53EF\u7528\u6A21\u677F\u53D8\u91CF" });
     const variables = help.createDiv({ cls: "iam-token-list" });
-    for (const token of ["{noteName}", "{fileName}", "{folderName}", "{vaultName}", "{YYYY}", "{MM}", "{DD}", "{index}", "{hash:12}", "{uuid}", "{frontmatter:key}"]) variables.createEl("code", { text: token });
-    const hashLength = this.number(content, "Hash \u957F\u5EA6", "\u4EC5\u5728\u6A21\u677F\u4F7F\u7528 {hash} \u6216 Hash \u51B2\u7A81\u7B56\u7565\u65F6\u751F\u6548\uFF1B12 \u4F4D\u901A\u5E38\u8DB3\u591F\u3002", this.plugin.settings.naming.hashLength, "\u4F4D", 6, 64, (value) => this.persist((s2) => s2.naming.hashLength = value, updatePreview));
-    const updateConflict = () => hashLength.settingEl.toggle(this.plugin.settings.naming.conflictStrategy === "hash");
-    new import_obsidian4.Setting(content).setName("\u6587\u4EF6\u540D\u51B2\u7A81\u65F6").setDesc("\u63A8\u8350 Hash\uFF1A\u76F8\u540C\u5185\u5BB9\u590D\u7528\u8FDC\u7A0B\u5730\u5740\uFF0C\u4E0D\u540C\u5185\u5BB9\u8FFD\u52A0\u6458\u8981\uFF1B\u8986\u76D6\u53EF\u80FD\u66FF\u6362\u5DF2\u6709\u5BF9\u8C61\u3002").addDropdown((dropdown) => dropdown.addOptions({ hash: "\u6309\u5185\u5BB9 Hash \u5224\u65AD\uFF08\u63A8\u8350\uFF09", increment: "\u81EA\u52A8\u8FFD\u52A0\u7F16\u53F7", skip: "\u8DF3\u8FC7\u51B2\u7A81\u6587\u4EF6", overwrite: "\u8986\u76D6\u8FDC\u7A0B\u6587\u4EF6" }).setValue(this.plugin.settings.naming.conflictStrategy).onChange(async (value) => {
+    for (const token of ["{noteName}", "{fileName}", "{folderName}", "{vaultName}", "{notePath}", "{YYYY}", "{MM}", "{DD}", "{HH}", "{mm}", "{ss}", "{index}", "{hash:12}", "{uuid}", "{frontmatter:key}"]) variables.createEl("code", { text: token });
+    const hashLength = this.number(content, "Hash \u957F\u5EA6", "\u6A21\u677F\u4F7F\u7528 {hash} \u6216\u4E91\u7AEF Hash \u51B2\u7A81\u7B56\u7565\u65F6\u751F\u6548\uFF1B12 \u4F4D\u901A\u5E38\u8DB3\u591F\u3002", this.plugin.settings.naming.hashLength, "\u4F4D", 6, 64, (value) => this.persist((s2) => s2.naming.hashLength = value, updatePreview));
+    updateHashLength = () => {
+      const templateUsesHash = this.plugin.settings.naming.filenameTemplate.includes("{hash") || usesUpload && this.plugin.settings.naming.remotePathTemplate.includes("{hash");
+      hashLength.settingEl.toggle(templateUsesHash || usesUpload && this.plugin.settings.naming.conflictStrategy === "hash");
+    };
+    if (usesUpload) new import_obsidian4.Setting(content).setName("\u8FDC\u7A0B\u6587\u4EF6\u51B2\u7A81\u65F6").setDesc("\u63A8\u8350 Hash\uFF1A\u76F8\u540C\u5185\u5BB9\u590D\u7528\u8FDC\u7A0B\u5730\u5740\uFF0C\u4E0D\u540C\u5185\u5BB9\u8FFD\u52A0\u6458\u8981\uFF1B\u8986\u76D6\u53EF\u80FD\u66FF\u6362\u5DF2\u6709\u5BF9\u8C61\u3002").addDropdown((dropdown) => dropdown.addOptions({ hash: "\u6309\u5185\u5BB9 Hash \u5224\u65AD\uFF08\u63A8\u8350\uFF09", increment: "\u81EA\u52A8\u8FFD\u52A0\u7F16\u53F7", skip: "\u8DF3\u8FC7\u51B2\u7A81\u6587\u4EF6", overwrite: "\u8986\u76D6\u8FDC\u7A0B\u6587\u4EF6" }).setValue(this.plugin.settings.naming.conflictStrategy).onChange(async (value) => {
       await this.persist((s2) => s2.naming.conflictStrategy = value);
-      updateConflict();
+      updateHashLength();
     }));
     new import_obsidian4.Setting(content).setName("\u5141\u8BB8\u4E2D\u6587\u6587\u4EF6\u540D").setDesc("\u5173\u95ED\u540E\u4F1A\u79FB\u9664\u975E ASCII \u5B57\u7B26\uFF0C\u9002\u5408\u4E0D\u652F\u6301 Unicode \u8DEF\u5F84\u7684\u65E7\u7CFB\u7EDF\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.naming.unicodeFilenames).onChange((value) => this.persist((s2) => s2.naming.unicodeFilenames = value, updatePreview)));
-    updateConflict();
+    updateHashLength();
     updatePreview();
   }
   renderMarkdownAndCleanup() {
@@ -20591,11 +20624,14 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     updateCleanup();
   }
   renderBatchAndAdvanced() {
-    const content = this.section("\u4EFB\u52A1\u4E0E\u8BCA\u65AD", "\u6279\u91CF\u8FC1\u79FB\u7684\u901F\u5EA6\u3001\u7F51\u7EDC\u5BB9\u9519\u548C\u95EE\u9898\u6392\u67E5\u9009\u9879\u3002\u9ED8\u8BA4\u503C\u9002\u5408\u5927\u591A\u6570\u7528\u6237\u3002", "gauge", false, `\u5E76\u53D1 ${this.plugin.settings.batch.concurrency}`);
-    this.number(content, "\u5E76\u53D1\u4E0A\u4F20\u6570", "\u7F51\u7EDC\u4E0D\u7A33\u5B9A\u6216\u670D\u52A1\u9650\u6D41\u65F6\u964D\u4F4E\u5230 1\u20132\uFF1B\u4E0D\u5EFA\u8BAE\u8D85\u8FC7 5\u3002", this.plugin.settings.batch.concurrency, "\u4E2A", 1, 10, (value) => this.persist((s2) => s2.batch.concurrency = value, () => this.updateSectionMeta(content, `\u5E76\u53D1 ${value}`)));
-    this.number(content, "\u5931\u8D25\u91CD\u8BD5\u6B21\u6570", "\u7F51\u7EDC\u9519\u8BEF\u65F6\u6309 1 \u79D2\u30013 \u79D2\u300110 \u79D2\u7684\u9000\u907F\u95F4\u9694\u91CD\u8BD5\u3002\u8BA4\u8BC1\u5931\u8D25\u901A\u5E38\u4E0D\u4F1A\u56E0\u91CD\u8BD5\u89E3\u51B3\u3002", this.plugin.settings.batch.retries, "\u6B21", 0, 10, (value) => this.persist((s2) => s2.batch.retries = value));
-    this.number(content, "\u5355\u6B21\u7F51\u7EDC\u8D85\u65F6", "HEAD \u9A8C\u8BC1\u8D85\u65F6\u540E\u4F1A\u5C1D\u8BD5 Range GET\uFF1B\u7F51\u7EDC\u8F83\u6162\u65F6\u53EF\u9002\u5F53\u589E\u52A0\u3002", Math.round(this.plugin.settings.batch.timeoutMs / 1e3), "\u79D2", 1, 120, (value) => this.persist((s2) => s2.batch.timeoutMs = value * 1e3));
-    new import_obsidian4.Setting(content).setName("\u9A8C\u8BC1\u516C\u5F00\u56FE\u7247\u5730\u5740").setDesc("\u5F3A\u70C8\u5EFA\u8BAE\u5F00\u542F\u3002\u53EA\u6709 URL \u8FD4\u56DE 200/206 \u540E\u624D\u66FF\u6362\u7B14\u8BB0\u94FE\u63A5\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.batch.verifyUpload).onChange((value) => this.persist((s2) => s2.batch.verifyUpload = value)));
+    const usesUpload = this.usesUpload();
+    const content = this.section("\u4EFB\u52A1\u4E0E\u8BCA\u65AD", usesUpload ? "\u6279\u91CF\u8FC1\u79FB\u7684\u901F\u5EA6\u3001\u7F51\u7EDC\u5BB9\u9519\u548C\u95EE\u9898\u6392\u67E5\u9009\u9879\u3002" : "\u672C\u5730\u8D44\u4EA7\u6E05\u5355\u548C\u95EE\u9898\u6392\u67E5\u9009\u9879\uFF1B\u4E0A\u4F20\u76F8\u5173\u53C2\u6570\u5DF2\u9690\u85CF\u3002", "gauge", false, usesUpload ? `\u5E76\u53D1 ${this.plugin.settings.batch.concurrency}` : "\u672C\u5730\u8BCA\u65AD");
+    if (usesUpload) {
+      this.number(content, "\u5E76\u53D1\u4E0A\u4F20\u6570", "\u7F51\u7EDC\u4E0D\u7A33\u5B9A\u6216\u670D\u52A1\u9650\u6D41\u65F6\u964D\u4F4E\u5230 1\u20132\uFF1B\u4E0D\u5EFA\u8BAE\u8D85\u8FC7 5\u3002", this.plugin.settings.batch.concurrency, "\u4E2A", 1, 10, (value) => this.persist((s2) => s2.batch.concurrency = value, () => this.updateSectionMeta(content, `\u5E76\u53D1 ${value}`)));
+      this.number(content, "\u5931\u8D25\u91CD\u8BD5\u6B21\u6570", "\u7F51\u7EDC\u9519\u8BEF\u65F6\u6309 1 \u79D2\u30013 \u79D2\u300110 \u79D2\u7684\u9000\u907F\u95F4\u9694\u91CD\u8BD5\u3002\u8BA4\u8BC1\u5931\u8D25\u901A\u5E38\u4E0D\u4F1A\u56E0\u91CD\u8BD5\u89E3\u51B3\u3002", this.plugin.settings.batch.retries, "\u6B21", 0, 10, (value) => this.persist((s2) => s2.batch.retries = value));
+      this.number(content, "\u5355\u6B21\u7F51\u7EDC\u8D85\u65F6", "HEAD \u9A8C\u8BC1\u8D85\u65F6\u540E\u4F1A\u5C1D\u8BD5 Range GET\uFF1B\u7F51\u7EDC\u8F83\u6162\u65F6\u53EF\u9002\u5F53\u589E\u52A0\u3002", Math.round(this.plugin.settings.batch.timeoutMs / 1e3), "\u79D2", 1, 120, (value) => this.persist((s2) => s2.batch.timeoutMs = value * 1e3));
+      new import_obsidian4.Setting(content).setName("\u9A8C\u8BC1\u516C\u5F00\u56FE\u7247\u5730\u5740").setDesc("\u5F3A\u70C8\u5EFA\u8BAE\u5F00\u542F\u3002\u53EA\u6709 URL \u8FD4\u56DE 200/206 \u540E\u624D\u66FF\u6362\u7B14\u8BB0\u94FE\u63A5\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.batch.verifyUpload).onChange((value) => this.persist((s2) => s2.batch.verifyUpload = value)));
+    }
     new import_obsidian4.Setting(content).setName("\u7EF4\u62A4\u8D44\u4EA7\u6E05\u5355").setDesc("\u7528\u4E8E\u589E\u91CF\u626B\u63CF\u3001Hash \u53BB\u91CD\u3001\u56FE\u7247\u7BA1\u7406\u5668\u548C\u8FC1\u79FB\u6062\u590D\uFF1B\u5173\u95ED\u4F1A\u5931\u53BB\u8DE8\u4EFB\u52A1\u53BB\u91CD\u80FD\u529B\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.advanced.manifestEnabled).onChange((value) => this.persist((s2) => s2.advanced.manifestEnabled = value)));
     new import_obsidian4.Setting(content).setName("\u65E5\u5FD7\u8BE6\u7EC6\u7A0B\u5EA6").setDesc("\u6B63\u5E38\u4F7F\u7528\u4FDD\u6301\u201C\u4FE1\u606F\u201D\uFF1B\u6392\u67E5\u95EE\u9898\u65F6\u4E34\u65F6\u9009\u62E9\u201C\u8C03\u8BD5\u201D\u3002\u65E5\u5FD7\u4E0D\u4F1A\u8BB0\u5F55\u5BC6\u94A5\u3002").addDropdown((dropdown) => dropdown.addOptions({ error: "\u4EC5\u9519\u8BEF", warn: "\u9519\u8BEF\u4E0E\u8B66\u544A", info: "\u4FE1\u606F\uFF08\u63A8\u8350\uFF09", debug: "\u8C03\u8BD5\u8BE6\u60C5" }).setValue(this.plugin.settings.advanced.logLevel).onChange((value) => this.persist((s2) => s2.advanced.logLevel = value)));
   }
@@ -20617,7 +20653,7 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     const item = list.createEl("li");
     const state = item.createSpan({ cls: "iam-setup-step__state" });
     (0, import_obsidian4.setIcon)(state, "check");
-    const copy = item.createSpan();
+    const copy = item.createSpan({ cls: "iam-setup-step__copy" });
     copy.createEl("strong", { text: title });
     copy.createEl("span", { text: description });
     return item;
@@ -20711,6 +20747,9 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
   }
   providerLabel() {
     return PROVIDER_LABELS[this.plugin.settings.uploader.provider];
+  }
+  usesUpload() {
+    return this.plugin.settings.workMode === "automatic";
   }
   cleanupLabel() {
     return this.plugin.settings.cleanup.strategy === "backup" ? "\u5907\u4EFD\u540E\u6E05\u7406" : this.plugin.settings.cleanup.strategy === "keep" ? "\u4FDD\u7559\u539F\u56FE" : "\u79FB\u81F3\u56DE\u6536\u7AD9";
@@ -20982,14 +21021,14 @@ var VaultPixPlugin = class extends import_obsidian7.Plugin {
     this.addCommand({ id: "align-current-image-center", name: "\u5F53\u524D\u56FE\u7247\uFF1A\u5C45\u4E2D", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view, "center") });
     this.addCommand({ id: "align-current-image-right", name: "\u5F53\u524D\u56FE\u7247\uFF1A\u5C45\u53F3", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view, "right") });
     this.addCommand({ id: "align-current-image-default", name: "\u5F53\u524D\u56FE\u7247\uFF1A\u6062\u590D\u9ED8\u8BA4\u5BF9\u9F50", editorCheckCallback: (checking, editor, view) => this.currentImageAlignmentCommand(checking, editor, view) });
-    this.addCommand({ id: "process-current-note", name: "\u5904\u7406\u5F53\u524D\u7B14\u8BB0\u4E2D\u7684\u5168\u90E8\u56FE\u7247", checkCallback: (checking) => {
+    this.addCommand({ id: "process-current-note", name: "\u6309\u5F53\u524D\u6A21\u5F0F\u5904\u7406\u672C\u7B14\u8BB0\u5168\u90E8\u56FE\u7247", checkCallback: (checking) => {
       const note = this.app.workspace.getActiveFile();
       if (!note) return false;
-      if (!checking) void this.runMigration(note.path);
+      if (!checking) void (this.shouldUpload(note) ? this.runMigration(note.path) : this.optimizeLocalReferences(note.path));
       return true;
     } });
     this.addCommand({ id: "scan-vault-images", name: "\u626B\u63CF\u6574\u4E2A\u5E93\u4E2D\u7684\u56FE\u7247", callback: () => void this.scanVault() });
-    this.addCommand({ id: "migrate-vault-images", name: "\u8FC1\u79FB\u6574\u4E2A\u5E93\u4E2D\u7684\u56FE\u7247", callback: () => void this.runMigration() });
+    this.addCommand({ id: "migrate-vault-images", name: "\u4E0A\u4F20\u5E76\u8FC1\u79FB\u6574\u4E2A\u5E93\u4E2D\u7684\u56FE\u7247", callback: () => void this.runMigration() });
     this.addCommand({ id: "open-image-manager", name: "\u6253\u5F00\u56FE\u7247\u7BA1\u7406\u5668", callback: () => void this.openManager() });
     this.addCommand({ id: "test-uploader", name: "\u6D4B\u8BD5\u56FE\u5E8A\u8FDE\u63A5", callback: () => void this.testConnection() });
     this.addCommand({ id: "undo-last-migration", name: "\u64A4\u9500\u4E0A\u4E00\u6B21\u56FE\u7247\u8FC1\u79FB", callback: () => void this.undoMigration() });
@@ -21009,7 +21048,8 @@ var VaultPixPlugin = class extends import_obsidian7.Plugin {
   registerContextMenus() {
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (!(file instanceof import_obsidian7.TFile) || !isImageName(file.name)) return;
-      menu.addItem((item) => item.setTitle("\u4F18\u5316\u5E76\u4E0A\u4F20\u56FE\u7247").setIcon("upload").onClick(() => void this.runFileMigration(file)));
+      const upload = this.settings.workMode === "automatic";
+      menu.addItem((item) => item.setTitle(upload ? "\u4F18\u5316\u5E76\u4E0A\u4F20\u56FE\u7247" : "\u4F18\u5316\u3001\u547D\u540D\u5E76\u66F4\u65B0\u5F15\u7528").setIcon(upload ? "upload" : "image").onClick(() => void (upload ? this.runFileMigration(file) : this.optimizeLocalReferences(void 0, file.path))));
       menu.addItem((item) => item.setTitle("\u590D\u5236 Markdown \u56FE\u7247\u94FE\u63A5").setIcon("copy").onClick(async () => {
         await navigator.clipboard.writeText(`![[${file.path}]]`);
         new import_obsidian7.Notice("\u5DF2\u590D\u5236\u56FE\u7247\u94FE\u63A5\u3002");
@@ -21022,19 +21062,18 @@ var VaultPixPlugin = class extends import_obsidian7.Plugin {
     if (source === "\u62D6\u62FD" && !this.settings.autoProcessDrop) return;
     const note = view.file;
     if (!note) return;
-    if (this.app.metadataCache.getFileCache(note)?.frontmatter?.["image-upload"] === false) return;
     event.preventDefault();
     void this.processIncoming(files, editor, note, source);
   }
   async processIncoming(files, editor, note, source) {
     const links = [];
+    const upload = this.shouldUpload(note);
     for (let index = 0; index < files.length; index++) {
       const file = files[index];
       if (!file) continue;
       const fallbackName = file.name || `\u526A\u8D34\u677F-${Date.now()}-${index + 1}.png`;
       const input = { name: fallbackName, mimeType: file.type || mimeFromName(fallbackName), data: await file.arrayBuffer() };
       try {
-        const upload = this.settings.workMode === "automatic";
         const result = await this.pipeline.execute({ input, note, index: index + 1, upload });
         if (upload && result.uploadResult) {
           links.push(this.pipeline.markdownFor(result.uploadResult.url, fallbackName.replace(/\.[^.]+$/, "")));
@@ -21090,6 +21129,9 @@ var VaultPixPlugin = class extends import_obsidian7.Plugin {
   clearImageAlignmentClasses() {
     document.body.removeClass("iam-default-image-align-left", "iam-default-image-align-center", "iam-default-image-align-right");
   }
+  shouldUpload(note) {
+    return this.settings.workMode === "automatic" && this.app.metadataCache.getFileCache(note)?.frontmatter?.["image-upload"] !== false;
+  }
   async processCurrentReference(note, image, reference, upload) {
     const before = await this.app.vault.read(note);
     try {
@@ -21116,6 +21158,70 @@ var VaultPixPlugin = class extends import_obsidian7.Plugin {
     const path = await this.app.fileManager.getAvailablePathForAttachment(input.name, note.path);
     const file = await this.app.vault.createBinary(path, input.data);
     return `!${this.app.fileManager.generateMarkdownLink(file, note.path)}`;
+  }
+  async optimizeLocalReferences(notePath, imagePath) {
+    const notice = new import_obsidian7.Notice(notePath ? "\u6B63\u5728\u672C\u5730\u5904\u7406\u5F53\u524D\u7B14\u8BB0\u7684\u56FE\u7247\u2026" : "\u6B63\u5728\u672C\u5730\u5904\u7406\u56FE\u7247\u2026", 0);
+    const createdFiles = [];
+    const noteBackups = /* @__PURE__ */ new Map();
+    try {
+      const report = await this.scanner.scan(false);
+      const assets = [...report.assets.values()].filter((asset) => !imagePath || asset.localPath === imagePath).map((asset) => ({ ...asset, references: asset.references.filter((reference) => !notePath || reference.notePath === notePath) })).filter((asset) => asset.references.length > 0);
+      if (!assets.length) {
+        notice.hide();
+        new import_obsidian7.Notice("\u6CA1\u6709\u627E\u5230\u9700\u8981\u672C\u5730\u5904\u7406\u7684\u56FE\u7247\u5F15\u7528\u3002");
+        return;
+      }
+      const replacementsByNote = /* @__PURE__ */ new Map();
+      for (let index = 0; index < assets.length; index++) {
+        const asset = assets[index];
+        if (!asset) continue;
+        const source = this.app.vault.getAbstractFileByPath(asset.localPath);
+        const contextNotePath = asset.references[0]?.notePath;
+        const contextNote = contextNotePath ? this.app.vault.getAbstractFileByPath(contextNotePath) : void 0;
+        if (!(source instanceof import_obsidian7.TFile) || !(contextNote instanceof import_obsidian7.TFile)) continue;
+        notice.setMessage(`\u6B63\u5728\u4F18\u5316 ${index + 1}/${assets.length}\uFF1A${source.name}`);
+        const input = { name: source.name, mimeType: mimeFromName(source.name), data: await this.app.vault.readBinary(source) };
+        const result = await this.pipeline.execute({ input, note: contextNote, sourceFile: source, index: index + 1, upload: false });
+        const outputPath = await this.app.fileManager.getAvailablePathForAttachment(result.filename, contextNote.path);
+        const output = await this.app.vault.createBinary(outputPath, result.processed.data);
+        createdFiles.push(output);
+        for (const reference of asset.references) {
+          const note = this.app.vault.getAbstractFileByPath(reference.notePath);
+          if (!(note instanceof import_obsidian7.TFile)) continue;
+          const alias = reference.displayWidth ? String(Math.round(reference.displayWidth)) : reference.alt || void 0;
+          const replacement = `!${this.app.fileManager.generateMarkdownLink(output, note.path, void 0, alias)}`;
+          replacementsByNote.set(reference.notePath, [...replacementsByNote.get(reference.notePath) ?? [], {
+            start: reference.start,
+            end: reference.end,
+            expected: reference.rawLink,
+            replacement
+          }]);
+        }
+      }
+      for (const [path, replacements] of replacementsByNote) {
+        const note = this.app.vault.getAbstractFileByPath(path);
+        if (!(note instanceof import_obsidian7.TFile)) continue;
+        const before = await this.app.vault.read(note);
+        noteBackups.set(path, before);
+        const after = new MarkdownReplacer().apply(before, replacements);
+        await this.app.vault.modify(note, after);
+        if (await this.app.vault.read(note) !== after) throw new Error(`\u5199\u5165\u540E\u6821\u9A8C\u5931\u8D25\uFF1A${path}`);
+      }
+      notice.hide();
+      const referenceCount = [...replacementsByNote.values()].reduce((sum, replacements) => sum + replacements.length, 0);
+      new import_obsidian7.Notice(`\u672C\u5730\u5904\u7406\u5B8C\u6210\uFF1A\u4F18\u5316\u5E76\u547D\u540D ${createdFiles.length} \u5F20\u56FE\u7247\uFF0C\u66F4\u65B0 ${referenceCount} \u5904\u5F15\u7528\u3002\u539F\u56FE\u7247\u5DF2\u4FDD\u7559\u3002`, 8e3);
+    } catch (error) {
+      for (const [path, content] of noteBackups) {
+        const note = this.app.vault.getAbstractFileByPath(path);
+        if (note instanceof import_obsidian7.TFile) await this.app.vault.modify(note, content);
+      }
+      for (const file of createdFiles) {
+        if (this.app.vault.getAbstractFileByPath(file.path) instanceof import_obsidian7.TFile) await this.app.vault.delete(file);
+      }
+      notice.hide();
+      new import_obsidian7.Notice(`\u672C\u5730\u5904\u7406\u5931\u8D25\uFF1A${errorMessage(error)}
+\u7B14\u8BB0\u5DF2\u6062\u590D\uFF0C\u672A\u7559\u4E0B\u4E0D\u5B8C\u6574\u7684\u65B0\u56FE\u7247\u3002`, 12e3);
+    }
   }
   async scanVault() {
     const notice = new import_obsidian7.Notice("\u6B63\u5728\u626B\u63CF\u56FE\u7247\u8D44\u4EA7\u2026", 0);

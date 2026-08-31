@@ -2,7 +2,7 @@ import type { PluginSettings } from "./types";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   enabled: true,
-  workMode: "automatic",
+  workMode: "semi-automatic",
   autoProcessPaste: true,
   autoProcessDrop: true,
   image: {

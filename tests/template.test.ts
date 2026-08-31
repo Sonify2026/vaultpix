@@ -11,4 +11,14 @@ describe("TemplateEngine", () => {
     expect(result).toBe("2026/08/插件-开发/前端/设计-007-12345678");
     vi.unstubAllGlobals();
   });
+
+  it("uses one stable timestamp and UUID across filename and path templates", () => {
+    const context = {
+      noteName: "Note", fileName: "Image", folderName: "Folder", vaultName: "Vault", notePath: "Folder/Note.md",
+      index: 1, hash: "abcdef1234567890", now: new Date(2026, 7, 31, 9, 30, 0), uuid: "stable-uuid"
+    };
+    const engine = new TemplateEngine();
+    expect(engine.render("{timestamp}-{uuid}", context)).toBe(`${context.now.getTime()}-stable-uuid`);
+    expect(engine.render("{YYYY}/{MM}/{uuid}", context, true)).toBe("2026/08/stable-uuid");
+  });
 });

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-vaultpix",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Optimize, align, upload, migrate, and safely manage images in Obsidian.",
   "main": "main.js",
   "type": "module",

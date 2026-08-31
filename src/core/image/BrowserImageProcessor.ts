@@ -3,7 +3,46 @@ import { ImageAssetError, ImageErrorCode } from "../../utils/errors";
 import { extensionForMime, extensionOf } from "../../utils/mime";
 import { sha256 } from "../../utils/hash";
 
-interface Geometry { canvasWidth: number; canvasHeight: number; sx: number; sy: number; sw: number; sh: number; }
+export interface ImageGeometry { canvasWidth: number; canvasHeight: number; sx: number; sy: number; sw: number; sh: number; }
+
+export function calculateImageGeometry(width: number, height: number, settings: ImageProcessSettings): ImageGeometry {
+  const identity = { canvasWidth: width, canvasHeight: height, sx: 0, sy: 0, sw: width, sh: height };
+  if (settings.resizeMode === "none") return identity;
+
+  let targetWidth = width;
+  let targetHeight = height;
+  if (settings.resizeMode === "width") targetWidth = settings.resizeWidth;
+  if (settings.resizeMode === "height") targetHeight = settings.resizeHeight;
+  if (settings.resizeMode === "long-edge") {
+    const scale = settings.longEdge / Math.max(width, height);
+    targetWidth = width * scale; targetHeight = height * scale;
+  } else if (settings.resizeMode === "short-edge") {
+    const scale = settings.shortEdge / Math.min(width, height);
+    targetWidth = width * scale; targetHeight = height * scale;
+  } else if (settings.resizeMode === "width") {
+    targetHeight = height * (targetWidth / width);
+  } else if (settings.resizeMode === "height") {
+    targetWidth = width * (targetHeight / height);
+  } else if (settings.resizeMode === "fit") {
+    const scale = Math.min(settings.resizeWidth / width, settings.resizeHeight / height);
+    targetWidth = width * scale; targetHeight = height * scale;
+  } else if (settings.resizeMode === "fill" || settings.resizeMode === "fixed") {
+    const canvasWidth = settings.resizeWidth;
+    const canvasHeight = settings.resizeHeight;
+    const scale = Math.max(canvasWidth / width, canvasHeight / height);
+    if (settings.preventUpscale && scale > 1) return identity;
+    const sourceRatio = width / height;
+    const targetRatio = canvasWidth / canvasHeight;
+    let sw = width, sh = height, sx = 0, sy = 0;
+    if (sourceRatio > targetRatio) { sw = height * targetRatio; sx = (width - sw) / 2; }
+    else { sh = width / targetRatio; sy = (height - sh) / 2; }
+    return { canvasWidth, canvasHeight, sx, sy, sw, sh };
+  }
+
+  const scale = Math.min(targetWidth / width, targetHeight / height);
+  if (settings.preventUpscale && scale >= 1) return identity;
+  return { ...identity, canvasWidth: Math.max(1, Math.round(targetWidth)), canvasHeight: Math.max(1, Math.round(targetHeight)) };
+}
 
 export class BrowserImageProcessor {
   async process(input: ImageInput, settings: ImageProcessSettings): Promise<ProcessedImage> {
@@ -13,8 +52,8 @@ export class BrowserImageProcessor {
 
     const inputExtension = extensionOf(input.name);
     const preserve = settings.outputFormat === "original" ||
-      (inputExtension === "gif" && settings.preserveGif) ||
-      (inputExtension === "svg" && settings.preserveSvg);
+      ((inputExtension === "gif" || input.mimeType === "image/gif") && settings.preserveGif) ||
+      ((inputExtension === "svg" || input.mimeType === "image/svg+xml") && settings.preserveSvg);
 
     if (preserve) {
       const dimensions = await this.readDimensions(input).catch(() => ({ width: 0, height: 0 }));
@@ -23,14 +62,18 @@ export class BrowserImageProcessor {
 
     const bitmap = await this.decode(input);
     try {
-      const geometry = this.calculateGeometry(bitmap.width, bitmap.height, settings);
+      const geometry = calculateImageGeometry(bitmap.width, bitmap.height, settings);
       const canvas = document.createElement("canvas");
       canvas.width = geometry.canvasWidth;
       canvas.height = geometry.canvasHeight;
       const context = canvas.getContext("2d", { alpha: true });
       if (!context) throw new ImageAssetError(ImageErrorCode.ENCODE_FAILED, "当前环境无法创建图片画布。");
-      context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const mimeType = this.outputMime(settings.outputFormat);
+      if (mimeType === "image/jpeg") {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, geometry.canvasWidth, geometry.canvasHeight);
+      }
+      context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const quality = this.quality(settings);
       const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, mimeType, quality));
       if (!blob || (settings.outputFormat === "avif" && blob.type !== "image/avif")) {
@@ -76,41 +119,4 @@ export class BrowserImageProcessor {
     return settings.webpQuality / 100;
   }
 
-  private calculateGeometry(width: number, height: number, settings: ImageProcessSettings): Geometry {
-    const identity = { canvasWidth: width, canvasHeight: height, sx: 0, sy: 0, sw: width, sh: height };
-    if (settings.resizeMode === "none") return identity;
-
-    let targetWidth = width;
-    let targetHeight = height;
-    if (settings.resizeMode === "width") targetWidth = settings.resizeWidth;
-    if (settings.resizeMode === "height") targetHeight = settings.resizeHeight;
-    if (settings.resizeMode === "long-edge") {
-      const scale = settings.longEdge / Math.max(width, height);
-      targetWidth = width * scale; targetHeight = height * scale;
-    } else if (settings.resizeMode === "short-edge") {
-      const scale = settings.shortEdge / Math.min(width, height);
-      targetWidth = width * scale; targetHeight = height * scale;
-    } else if (settings.resizeMode === "width") {
-      targetHeight = height * (targetWidth / width);
-    } else if (settings.resizeMode === "height") {
-      targetWidth = width * (targetHeight / height);
-    } else if (settings.resizeMode === "fit") {
-      const scale = Math.min(settings.resizeWidth / width, settings.resizeHeight / height);
-      targetWidth = width * scale; targetHeight = height * scale;
-    } else if (settings.resizeMode === "fill" || settings.resizeMode === "fixed") {
-      const canvasWidth = settings.resizeWidth;
-      const canvasHeight = settings.resizeHeight;
-      const sourceRatio = width / height;
-      const targetRatio = canvasWidth / canvasHeight;
-      let sw = width, sh = height, sx = 0, sy = 0;
-      if (sourceRatio > targetRatio) { sw = height * targetRatio; sx = (width - sw) / 2; }
-      else { sh = width / targetRatio; sy = (height - sh) / 2; }
-      if (settings.preventUpscale && canvasWidth > width && canvasHeight > height) return identity;
-      return { canvasWidth, canvasHeight, sx, sy, sw, sh };
-    }
-
-    const scale = Math.min(targetWidth / width, targetHeight / height);
-    if (settings.preventUpscale && scale >= 1) return identity;
-    return { ...identity, canvasWidth: Math.max(1, Math.round(targetWidth)), canvasHeight: Math.max(1, Math.round(targetHeight)) };
-  }
 }

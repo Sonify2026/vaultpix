@@ -2,10 +2,14 @@ import { App, PluginSettingTab, Setting, setIcon, type ButtonComponent, type Tog
 import type VaultPixPlugin from "../main";
 import type { OutputFormat, ResizeMode, S3Provider, S3Settings } from "../types";
 import { applyProviderDefaults, ossEndpoint, ossPublicBaseUrl, PROVIDER_LABELS } from "../uploaders/provider";
+import { TemplateEngine } from "../naming/TemplateEngine";
+import { joinVaultPath } from "../utils/path";
 
 type Settings = VaultPixPlugin["settings"];
 
 export class ImageAssetSettingsTab extends PluginSettingTab {
+  private readonly templates = new TemplateEngine();
+
   constructor(app: App, private readonly plugin: VaultPixPlugin) { super(app, plugin); }
 
   override display(): void {
@@ -29,20 +33,22 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
     const mark = header.createDiv({ cls: "iam-settings-hero__mark" }); setIcon(mark, "images");
     const copy = header.createDiv({ cls: "iam-settings-hero__copy" });
     copy.createEl("h2", { text: "VaultPix · 云图匣" });
-    copy.createEl("p", { text: "让图片从粘贴、优化、上传到备份始终清晰可控。完成下方三步，即可开始使用。" });
+    copy.createEl("p", { text: "只在本地优化与命名，或连接云端自动上传——两种方式都可以独立、安静地使用。" });
   }
 
   private renderSetupGuide(): () => void {
+    const usesUpload = this.usesUpload();
+    const manual = this.plugin.settings.workMode === "manual";
     const guide = this.containerEl.createDiv({ cls: "iam-setup-guide" });
     const top = guide.createDiv({ cls: "iam-setup-guide__top" });
     const copy = top.createDiv();
     copy.createEl("h3", { text: "开始前检查" });
-    copy.createEl("p", { text: "约 3 分钟。熟悉 S3/R2 的用户可以直接展开对应分类。" });
+    copy.createEl("p", { text: usesUpload ? "云端模式需要完成服务配置；第一次使用约 3 分钟。" : manual ? "按需模式不会接管粘贴或拖拽，只在你运行命令时处理。" : "本地模式无需配置上传服务，也不会显示上传提醒。" });
     const status = top.createSpan({ cls: "iam-status-badge" });
     const steps = guide.createEl("ol", { cls: "iam-setup-steps" });
-    const behaviorStep = this.setupStep(steps, "选择工作方式", "决定粘贴图片后是否自动上传");
-    const providerStep = this.setupStep(steps, "填写上传服务", "配置 Bucket、密钥和公开域名");
-    const testStep = this.setupStep(steps, "测试真实连接", "确认 Bucket 权限；首次上传再验证公开地址");
+    const behaviorStep = this.setupStep(steps, "选择工作方式", usesUpload ? "优化、命名后上传到云端" : manual ? "仅在运行命令时处理" : "优化、命名后保存到本地");
+    const providerStep = this.setupStep(steps, usesUpload ? "填写上传服务" : "设置图片优化", usesUpload ? "配置 Bucket、密钥和公开域名" : "选择格式、画质和目标尺寸");
+    const testStep = this.setupStep(steps, usesUpload ? "测试真实连接" : "设置文件命名", usesUpload ? "确认 Bucket 权限；首次上传再验证公开地址" : "按模板生成清晰、一致的文件名");
     const summary = guide.createDiv({ cls: "iam-workflow-summary" });
     const summaryIcon = summary.createSpan(); setIcon(summaryIcon, "workflow");
     const summaryText = summary.createSpan();
@@ -51,18 +57,18 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
       const missing = this.missingUploaderFields();
       const tested = this.currentConnectionTest();
       behaviorStep.toggleClass("is-complete", true);
-      providerStep.toggleClass("is-complete", missing.length === 0);
-      testStep.toggleClass("is-complete", tested?.success === true);
+      providerStep.toggleClass("is-complete", !usesUpload || missing.length === 0);
+      testStep.toggleClass("is-complete", !usesUpload || tested?.success === true);
       status.removeClass("is-ready", "is-warning", "is-error");
       if (!this.plugin.settings.enabled) { status.addClass("is-warning"); status.setText("插件已停用"); }
-      else if (this.plugin.settings.workMode !== "automatic" && missing.length) { status.addClass("is-ready"); status.setText("本地处理已就绪"); }
+      else if (!usesUpload) { status.addClass("is-ready"); status.setText(manual ? "按需处理已就绪" : "本地处理已就绪"); }
       else if (missing.length) { status.addClass("is-warning"); status.setText(`还需填写 ${missing.length} 项`); }
       else if (!tested) { status.addClass("is-warning"); status.setText("等待连接测试"); }
       else if (tested.success) { status.addClass("is-ready"); status.setText("可以开始使用"); }
       else { status.addClass("is-error"); status.setText("连接测试失败"); }
-      const mode = this.plugin.settings.workMode === "automatic" ? "自动处理并上传" : this.plugin.settings.workMode === "semi-automatic" ? "自动优化、手动上传" : "仅在执行命令时处理";
+      const mode = this.plugin.settings.workMode === "automatic" ? "云端：优化、命名并上传" : this.plugin.settings.workMode === "semi-automatic" ? "本地：仅优化与命名" : "按需：仅运行命令";
       const resize = this.plugin.settings.image.resizeMode === "long-edge" ? `最长边 ${this.plugin.settings.image.longEdge}px` : this.resizeModeLabel(this.plugin.settings.image.resizeMode);
-      summaryText.setText(`当前流程：${mode} · ${this.plugin.settings.image.outputFormat.toUpperCase()} · ${resize} · ${this.providerLabel()}`);
+      summaryText.setText(`当前流程：${mode} · ${this.plugin.settings.image.outputFormat.toUpperCase()} · ${resize}${usesUpload ? ` · ${this.providerLabel()}` : " · Obsidian 本地附件"}`);
     };
     update();
     return update;
@@ -76,10 +82,10 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
     let pasteToggle: ToggleComponent | undefined;
     let dropToggle: ToggleComponent | undefined;
     let updateAutomationState = (): void => undefined;
-    new Setting(content).setName("工作模式").setDesc("推荐“自动”：上传并验证成功后才替换笔记链接；任何失败都会保留本地图片。")
-      .addDropdown(dropdown => dropdown.addOptions({ automatic: "自动：优化并上传", "semi-automatic": "半自动：仅优化到本地", manual: "手动：仅响应命令" }).setValue(this.plugin.settings.workMode).onChange(async value => {
+    new Setting(content).setName("图片处理方式").setDesc("推荐本地模式：无需图床，只做图片优化和命名。需要远程链接时再切换到云端模式。")
+      .addDropdown(dropdown => dropdown.addOptions({ "semi-automatic": "本地模式：仅优化与命名（推荐）", automatic: "云端模式：优化、命名并上传", manual: "按需模式：仅运行命令" }).setValue(this.plugin.settings.workMode).onChange(async value => {
         await this.persist(s => s.workMode = value as Settings["workMode"]);
-        updateAutomationState(); refreshSetup();
+        this.display();
       }));
     const pasteSetting = new Setting(content).setName("处理粘贴图片").setDesc("从剪贴板粘贴图片时执行当前工作模式。失败时会自动保留为本地附件。")
       .addToggle(toggle => { pasteToggle = toggle; toggle.setValue(this.plugin.settings.autoProcessPaste).onChange(value => this.persist(s => s.autoProcessPaste = value)); });
@@ -96,10 +102,11 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   }
 
   private renderUploader(refreshSetup: () => void): void {
+    const usesUpload = this.usesUpload();
     const missing = this.missingUploaderFields();
     const tested = this.currentConnectionTest();
     const needsUploadSetup = this.plugin.settings.workMode === "automatic" && (missing.length > 0 || tested?.success !== true);
-    const content = this.section("上传服务", "连接 Cloudflare R2、阿里云 OSS 或其他 S3 兼容对象存储。自动模式必须完成这里。", "cloud-upload", needsUploadSetup, tested?.success ? "连接正常" : missing.length ? `缺少 ${missing.length} 项` : "待测试");
+    const content = this.section("上传服务", usesUpload ? "连接 Cloudflare R2、阿里云 OSS 或其他 S3 兼容对象存储。" : "可选功能。当前模式只在本地优化和命名，不检查凭据，也不会提醒配置。", "cloud-upload", needsUploadSetup, !usesUpload ? "当前未使用" : tested?.success ? "连接正常" : missing.length ? `缺少 ${missing.length} 项` : "待测试");
     const connectionState = content.createDiv({ cls: "iam-connection-state" });
     const connectionIcon = connectionState.createSpan({ cls: "iam-connection-state__icon" });
     const connectionCopy = connectionState.createDiv();
@@ -109,8 +116,12 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
     const refreshConnectionState = (): void => {
       const fields = this.missingUploaderFields();
       const result = this.currentConnectionTest();
-      connectionState.removeClass("is-ready", "is-warning", "is-error"); connectionIcon.empty();
-      if (fields.length) {
+      connectionState.removeClass("is-ready", "is-warning", "is-error", "is-idle"); connectionIcon.empty();
+      if (!usesUpload) {
+        connectionState.addClass("is-idle"); setIcon(connectionIcon, "cloud-off");
+        connectionTitle.setText("当前不会上传图片"); connectionDescription.setText("当前模式只优化格式、尺寸和文件名。这里可以保持空白，需要云端链接时再配置。");
+        this.updateSectionMeta(content, "当前未使用");
+      } else if (fields.length) {
         connectionState.addClass("is-warning"); setIcon(connectionIcon, "circle-alert");
         connectionTitle.setText("配置尚未完成"); connectionDescription.setText(`请填写：${fields.join("、")}。`);
         this.updateSectionMeta(content, `缺少 ${fields.length} 项`);
@@ -251,39 +262,45 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   }
 
   private renderNaming(): void {
-    const content = this.section("命名与远程目录", "定义最终文件名和对象存储中的目录结构。修改前先查看实时示例。", "folder-tree", false, "使用模板");
+    const usesUpload = this.usesUpload();
+    const content = this.section("命名与目录", usesUpload ? "定义最终文件名和对象存储中的目录结构；预览与实际处理使用同一套模板引擎。" : "定义优化后保存到 Obsidian 的文件名；本地模式不会使用远程目录。", "folder-tree", false, usesUpload ? "云端模板" : "本地命名");
     const preview = content.createDiv({ cls: "iam-template-preview" });
     preview.createEl("strong", { text: "实时示例" });
     const filenamePreview = preview.createEl("code");
     const pathPreview = preview.createEl("code");
+    let updateHashLength = (): void => undefined;
     const updatePreview = (): void => {
-      const date = new Date();
-      const values: Record<string, string> = { noteName: "项目复盘", fileName: "截图", folderName: "工作", vaultName: this.app.vault.getName(), notePath: "工作/项目复盘", YYYY: String(date.getFullYear()), MM: String(date.getMonth() + 1).padStart(2, "0"), DD: String(date.getDate()).padStart(2, "0"), HH: "09", mm: "30", ss: "00", timestamp: String(date.getTime()), index: "001", uuid: "a1b2c3d4", hash: "9f31a2bc410e" };
-      const render = (template: string): string => template.replace(/\{(hash(?::\d+)?|[^}]+)\}/g, (_match, token: string) => {
-        if (token.startsWith("hash:")) return values.hash?.slice(0, Number(token.split(":")[1])) ?? "";
-        if (token.startsWith("frontmatter:")) return "分类";
-        return values[token] ?? `{${token}}`;
-      });
-      const extension = this.plugin.settings.image.outputFormat === "original" ? "原扩展名" : this.plugin.settings.image.outputFormat;
-      const filename = `${render(this.plugin.settings.naming.filenameTemplate)}.${extension}`;
+      const context = {
+        noteName: "项目复盘", fileName: "截图", folderName: "工作", vaultName: this.app.vault.getName(), notePath: "工作/项目复盘.md",
+        index: 1, hash: "9f31a2bc410e7d58", now: new Date(2026, 7, 31, 9, 30, 0), uuid: "a1b2c3d4-e5f6-4789-abcd-0123456789ab", frontmatter: { category: "设计" }
+      };
+      const extension = this.plugin.settings.image.outputFormat === "original" ? "png" : this.plugin.settings.image.outputFormat;
+      const filename = `${this.templates.render(this.plugin.settings.naming.filenameTemplate, context, false, this.plugin.settings.naming.unicodeFilenames)}.${extension}`;
       filenamePreview.setText(`文件名  ${filename}`);
-      pathPreview.setText(`远程路径  ${this.plugin.settings.uploader.pathPrefix ? `${this.plugin.settings.uploader.pathPrefix}/` : ""}${render(this.plugin.settings.naming.remotePathTemplate)}/${filename}`);
+      if (usesUpload) {
+        const folder = this.templates.render(this.plugin.settings.naming.remotePathTemplate, context, true, this.plugin.settings.naming.unicodeFilenames);
+        pathPreview.setText(`远程路径  ${joinVaultPath(this.plugin.settings.uploader.pathPrefix, folder, filename)}`);
+      } else pathPreview.setText(`保存结果  Obsidian 附件目录/${filename}`);
     };
-    this.text(content, "文件名模板", "控制最终图片文件名。无需填写扩展名，插件会自动添加。", this.plugin.settings.naming.filenameTemplate, "{noteName}-{index}", value => this.persist(s => s.naming.filenameTemplate = value, updatePreview));
-    this.text(content, "远程目录模板", "控制 Bucket 内的目录层级；路径前缀会自动放在它前面。", this.plugin.settings.naming.remotePathTemplate, "obsidian/{YYYY}/{MM}/{noteName}", value => this.persist(s => s.naming.remotePathTemplate = value, updatePreview));
+    const refreshNamingPreview = (): void => { updatePreview(); updateHashLength(); };
+    this.text(content, "文件名模板", "控制最终图片文件名。无需填写扩展名，插件会自动添加。", this.plugin.settings.naming.filenameTemplate, "{noteName}-{index}", value => this.persist(s => s.naming.filenameTemplate = value, refreshNamingPreview));
+    if (usesUpload) this.text(content, "远程目录模板", "只用于云端上传。控制 Bucket 内的目录层级；路径前缀会自动放在它前面。", this.plugin.settings.naming.remotePathTemplate, "obsidian/{YYYY}/{MM}/{noteName}", value => this.persist(s => s.naming.remotePathTemplate = value, refreshNamingPreview));
     const help = content.createEl("details", { cls: "iam-inline-help" });
     const summary = help.createEl("summary"); const helpIcon = summary.createSpan(); setIcon(helpIcon, "braces"); summary.createSpan({ text: "查看可用模板变量" });
     const variables = help.createDiv({ cls: "iam-token-list" });
-    for (const token of ["{noteName}", "{fileName}", "{folderName}", "{vaultName}", "{YYYY}", "{MM}", "{DD}", "{index}", "{hash:12}", "{uuid}", "{frontmatter:key}"]) variables.createEl("code", { text: token });
-    const hashLength = this.number(content, "Hash 长度", "仅在模板使用 {hash} 或 Hash 冲突策略时生效；12 位通常足够。", this.plugin.settings.naming.hashLength, "位", 6, 64, value => this.persist(s => s.naming.hashLength = value, updatePreview));
-    const updateConflict = (): void => hashLength.settingEl.toggle(this.plugin.settings.naming.conflictStrategy === "hash");
-    new Setting(content).setName("文件名冲突时").setDesc("推荐 Hash：相同内容复用远程地址，不同内容追加摘要；覆盖可能替换已有对象。")
+    for (const token of ["{noteName}", "{fileName}", "{folderName}", "{vaultName}", "{notePath}", "{YYYY}", "{MM}", "{DD}", "{HH}", "{mm}", "{ss}", "{index}", "{hash:12}", "{uuid}", "{frontmatter:key}"]) variables.createEl("code", { text: token });
+    const hashLength = this.number(content, "Hash 长度", "模板使用 {hash} 或云端 Hash 冲突策略时生效；12 位通常足够。", this.plugin.settings.naming.hashLength, "位", 6, 64, value => this.persist(s => s.naming.hashLength = value, updatePreview));
+    updateHashLength = (): void => {
+      const templateUsesHash = this.plugin.settings.naming.filenameTemplate.includes("{hash") || (usesUpload && this.plugin.settings.naming.remotePathTemplate.includes("{hash"));
+      hashLength.settingEl.toggle(templateUsesHash || (usesUpload && this.plugin.settings.naming.conflictStrategy === "hash"));
+    };
+    if (usesUpload) new Setting(content).setName("远程文件冲突时").setDesc("推荐 Hash：相同内容复用远程地址，不同内容追加摘要；覆盖可能替换已有对象。")
       .addDropdown(dropdown => dropdown.addOptions({ hash: "按内容 Hash 判断（推荐）", increment: "自动追加编号", skip: "跳过冲突文件", overwrite: "覆盖远程文件" }).setValue(this.plugin.settings.naming.conflictStrategy).onChange(async value => {
-        await this.persist(s => s.naming.conflictStrategy = value as Settings["naming"]["conflictStrategy"]); updateConflict();
+        await this.persist(s => s.naming.conflictStrategy = value as Settings["naming"]["conflictStrategy"]); updateHashLength();
       }));
     new Setting(content).setName("允许中文文件名").setDesc("关闭后会移除非 ASCII 字符，适合不支持 Unicode 路径的旧系统。")
       .addToggle(toggle => toggle.setValue(this.plugin.settings.naming.unicodeFilenames).onChange(value => this.persist(s => s.naming.unicodeFilenames = value, updatePreview)));
-    updateConflict(); updatePreview();
+    updateHashLength(); updatePreview();
   }
 
   private renderMarkdownAndCleanup(): void {
@@ -327,12 +344,15 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   }
 
   private renderBatchAndAdvanced(): void {
-    const content = this.section("任务与诊断", "批量迁移的速度、网络容错和问题排查选项。默认值适合大多数用户。", "gauge", false, `并发 ${this.plugin.settings.batch.concurrency}`);
-    this.number(content, "并发上传数", "网络不稳定或服务限流时降低到 1–2；不建议超过 5。", this.plugin.settings.batch.concurrency, "个", 1, 10, value => this.persist(s => s.batch.concurrency = value, () => this.updateSectionMeta(content, `并发 ${value}`)));
-    this.number(content, "失败重试次数", "网络错误时按 1 秒、3 秒、10 秒的退避间隔重试。认证失败通常不会因重试解决。", this.plugin.settings.batch.retries, "次", 0, 10, value => this.persist(s => s.batch.retries = value));
-    this.number(content, "单次网络超时", "HEAD 验证超时后会尝试 Range GET；网络较慢时可适当增加。", Math.round(this.plugin.settings.batch.timeoutMs / 1000), "秒", 1, 120, value => this.persist(s => s.batch.timeoutMs = value * 1000));
-    new Setting(content).setName("验证公开图片地址").setDesc("强烈建议开启。只有 URL 返回 200/206 后才替换笔记链接。")
-      .addToggle(toggle => toggle.setValue(this.plugin.settings.batch.verifyUpload).onChange(value => this.persist(s => s.batch.verifyUpload = value)));
+    const usesUpload = this.usesUpload();
+    const content = this.section("任务与诊断", usesUpload ? "批量迁移的速度、网络容错和问题排查选项。" : "本地资产清单和问题排查选项；上传相关参数已隐藏。", "gauge", false, usesUpload ? `并发 ${this.plugin.settings.batch.concurrency}` : "本地诊断");
+    if (usesUpload) {
+      this.number(content, "并发上传数", "网络不稳定或服务限流时降低到 1–2；不建议超过 5。", this.plugin.settings.batch.concurrency, "个", 1, 10, value => this.persist(s => s.batch.concurrency = value, () => this.updateSectionMeta(content, `并发 ${value}`)));
+      this.number(content, "失败重试次数", "网络错误时按 1 秒、3 秒、10 秒的退避间隔重试。认证失败通常不会因重试解决。", this.plugin.settings.batch.retries, "次", 0, 10, value => this.persist(s => s.batch.retries = value));
+      this.number(content, "单次网络超时", "HEAD 验证超时后会尝试 Range GET；网络较慢时可适当增加。", Math.round(this.plugin.settings.batch.timeoutMs / 1000), "秒", 1, 120, value => this.persist(s => s.batch.timeoutMs = value * 1000));
+      new Setting(content).setName("验证公开图片地址").setDesc("强烈建议开启。只有 URL 返回 200/206 后才替换笔记链接。")
+        .addToggle(toggle => toggle.setValue(this.plugin.settings.batch.verifyUpload).onChange(value => this.persist(s => s.batch.verifyUpload = value)));
+    }
     new Setting(content).setName("维护资产清单").setDesc("用于增量扫描、Hash 去重、图片管理器和迁移恢复；关闭会失去跨任务去重能力。")
       .addToggle(toggle => toggle.setValue(this.plugin.settings.advanced.manifestEnabled).onChange(value => this.persist(s => s.advanced.manifestEnabled = value)));
     new Setting(content).setName("日志详细程度").setDesc("正常使用保持“信息”；排查问题时临时选择“调试”。日志不会记录密钥。")
@@ -354,7 +374,7 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   private setupStep(list: HTMLOListElement, title: string, description: string): HTMLLIElement {
     const item = list.createEl("li");
     const state = item.createSpan({ cls: "iam-setup-step__state" }); setIcon(state, "check");
-    const copy = item.createSpan(); copy.createEl("strong", { text: title }); copy.createEl("span", { text: description });
+    const copy = item.createSpan({ cls: "iam-setup-step__copy" }); copy.createEl("strong", { text: title }); copy.createEl("span", { text: description });
     return item;
   }
 
@@ -436,6 +456,7 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   }
 
   private providerLabel(): string { return PROVIDER_LABELS[this.plugin.settings.uploader.provider]; }
+  private usesUpload(): boolean { return this.plugin.settings.workMode === "automatic"; }
   private cleanupLabel(): string { return this.plugin.settings.cleanup.strategy === "backup" ? "备份后清理" : this.plugin.settings.cleanup.strategy === "keep" ? "保留原图" : "移至回收站"; }
   private resizeModeLabel(mode: ResizeMode): string {
     const labels: Record<ResizeMode, string> = { none: "不调整尺寸", width: "限制宽度", height: "限制高度", "long-edge": "限制最长边", "short-edge": "限制最短边", fit: "适应范围", fill: "填充裁剪", fixed: "固定尺寸" };

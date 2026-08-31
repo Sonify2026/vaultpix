@@ -104,7 +104,7 @@ export class ImagePipeline {
       noteName: note?.basename ?? this.baseName(inputName).replace(/\.[^.]+$/, ""),
       fileName: this.baseName(inputName).replace(/\.[^.]+$/, ""),
       folderName: note ? this.baseName(note.parent?.path ?? "") || "根目录" : "剪贴板",
-      vaultName: this.app.vault.getName(), notePath, index, hash, frontmatter
+      vaultName: this.app.vault.getName(), notePath, index, hash, now: new Date(), uuid: crypto.randomUUID(), frontmatter
     };
   }
 

@@ -2,6 +2,23 @@
 
 All notable changes to VaultPix are documented here.
 
+## 1.2.0 - 2026-08-31
+
+### Fixed
+
+- Corrected setup-step checkmark and number centering by removing the conflicting global span rule.
+- Restored comfortable horizontal padding for all settings rows and matching mobile spacing.
+- Fixed fill/fixed resize modes so “prevent upscale” works when either target axis would enlarge the image.
+- Preserved GIF/SVG by MIME type as well as filename extension and rendered transparent images onto white when exporting JPEG.
+- Replaced the approximate naming preview with the real template engine and stabilized timestamps/UUIDs across filename and path rendering.
+- Fixed `image-upload: false` so it disables cloud upload without disabling local optimization.
+
+### Changed
+
+- Local optimization and naming is now the default mode and never prompts for upload configuration.
+- Setup guidance, uploader status, naming fields, and diagnostics adapt to local, cloud, and on-demand modes.
+- “Process all images in this note” now follows the selected mode; local mode creates optimized local files, safely updates references, and keeps originals.
+
 ## 1.1.0 - 2026-08-28
 
 ### Added
