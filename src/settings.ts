@@ -6,11 +6,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoProcessPaste: true,
   autoProcessDrop: true,
   image: {
-    outputFormat: "webp",
+    outputFormat: "original",
     webpQuality: 82,
     jpegQuality: 85,
     avifQuality: 70,
-    resizeMode: "long-edge",
+    resizeMode: "none",
     resizeWidth: 2560,
     resizeHeight: 2560,
     longEdge: 2560,
@@ -34,8 +34,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     accessKeyId: "",
     secretAccessKey: "",
     publicBaseUrl: "",
-    pathPrefix: ""
-    ,forcePathStyle: false
+    pathPrefix: "",
+    forcePathStyle: false
   },
   markdown: { preserveAlt: true, wikiSizeStrategy: "html", imageAlignment: "center" },
   cleanup: { strategy: "backup", backupFolder: ".vaultpix-backup" },

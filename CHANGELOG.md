@@ -2,6 +2,26 @@
 
 All notable changes to VaultPix are documented here.
 
+## 1.3.0 - 2026-09-18
+
+### Changed
+
+- New installations preserve original image bytes by default; lossy conversion and resizing now require an explicit choice. Existing vault settings remain unchanged.
+- Settings explain the visual impact of lossy codecs, resizing, and the exact-byte original mode.
+
+### Fixed
+
+- Reject silent browser encoder fallback to a different MIME type; use high-quality interpolation when resizing.
+- Scope processed-image deduplication to the provider, endpoint, bucket, and public base URL instead of reusing stale destinations.
+- Respect the configured Hash length in templates and probe each generated remote conflict path before uploading.
+- Serialize concurrent uploads targeting the same remote path so two images in one batch cannot silently overwrite each other.
+- Protect post-migration note edits during rollback and recovery; detect conflicts before restoring any note.
+- Avoid recording uploaded images in the asset manifest before Markdown replacement succeeds, and allow stores to recover after an isolated write failure.
+
+### Verified
+
+- Added regression coverage for byte preservation, encoder fallback, destination-scoped deduplication, remote collisions, and recovery safety.
+
 ## 1.2.0 - 2026-08-31
 
 ### Fixed

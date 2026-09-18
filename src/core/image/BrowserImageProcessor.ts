@@ -68,6 +68,7 @@ export class BrowserImageProcessor {
       canvas.height = geometry.canvasHeight;
       const context = canvas.getContext("2d", { alpha: true });
       if (!context) throw new ImageAssetError(ImageErrorCode.ENCODE_FAILED, "当前环境无法创建图片画布。");
+      context.imageSmoothingQuality = "high";
       const mimeType = this.outputMime(settings.outputFormat);
       if (mimeType === "image/jpeg") {
         context.fillStyle = "#ffffff";
@@ -76,7 +77,7 @@ export class BrowserImageProcessor {
       context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const quality = this.quality(settings);
       const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, mimeType, quality));
-      if (!blob || (settings.outputFormat === "avif" && blob.type !== "image/avif")) {
+      if (!blob || blob.type !== mimeType) {
         throw new ImageAssetError(ImageErrorCode.UNSUPPORTED_FORMAT, `当前 Obsidian/Electron 环境不支持输出 ${settings.outputFormat.toUpperCase()}。`);
       }
       return this.finish(await blob.arrayBuffer(), blob.type || mimeType, canvas.width, canvas.height, input.data.byteLength);

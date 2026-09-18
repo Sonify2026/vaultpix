@@ -1,5 +1,5 @@
 import type { App } from "obsidian";
-import type { AssetManifestItem } from "../types";
+import type { AssetManifestItem, S3Settings } from "../types";
 import { joinVaultPath } from "../utils/path";
 
 interface ManifestData { version: 1; items: AssetManifestItem[]; }
@@ -30,7 +30,9 @@ export class ManifestStore {
 
   async upsert(item: AssetManifestItem): Promise<void> {
     await this.load();
-    const existingIndex = this.data.items.findIndex(candidate => candidate.id === item.id || candidate.processedHash === item.processedHash);
+    const existingIndex = this.data.items.findIndex(candidate => candidate.processedHash === item.processedHash &&
+      candidate.provider === item.provider && candidate.bucket === item.bucket &&
+      candidate.endpoint === item.endpoint && candidate.publicBaseUrl === item.publicBaseUrl);
     if (existingIndex >= 0) {
       const previous = this.data.items[existingIndex];
       if (previous) this.data.items[existingIndex] = { ...previous, ...item, sourcePath: previous.sourcePath, createdAt: previous.createdAt, references: [...new Set([...previous.references, ...item.references])] };
@@ -38,13 +40,17 @@ export class ManifestStore {
     await this.save();
   }
 
-  async findByProcessedHash(hash: string): Promise<AssetManifestItem | undefined> { await this.load(); return this.data.items.find(item => item.processedHash === hash); }
+  async findByProcessedHash(hash: string, uploader: S3Settings): Promise<AssetManifestItem | undefined> {
+    await this.load();
+    return this.data.items.find(item => item.processedHash === hash && item.provider === uploader.provider &&
+      item.bucket === uploader.bucket && item.endpoint === uploader.endpoint && item.publicBaseUrl === uploader.publicBaseUrl);
+  }
   async findBySourcePath(path: string): Promise<AssetManifestItem | undefined> { await this.load(); return this.data.items.find(item => item.sourcePath === path); }
   async all(): Promise<AssetManifestItem[]> { await this.load(); return this.data.items.map(item => ({ ...item, references: [...item.references] })); }
   async removeByMigrationUrls(urls: Set<string>): Promise<void> { await this.load(); this.data.items = this.data.items.filter(item => !urls.has(item.url)); await this.save(); }
 
   private async save(): Promise<void> {
-    this.writeChain = this.writeChain.then(async () => {
+    this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
       await this.ensureDirectory();
       await this.app.vault.adapter.write(this.filePath(), JSON.stringify(this.data, null, 2));
     });

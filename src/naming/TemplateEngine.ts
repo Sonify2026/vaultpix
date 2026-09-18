@@ -29,7 +29,7 @@ export class TemplateEngine {
         const value = context.frontmatter?.[frontmatterKey ?? ""];
         return value === undefined || value === null ? "" : String(value);
       }
-      if (token.startsWith("hash")) return context.hash.slice(0, Number(hashLength || context.hash.length));
+      if (token.startsWith("hash")) return context.hash.slice(0, Number(hashLength || context.hashLength || context.hash.length));
       return values[token] ?? "";
     });
 

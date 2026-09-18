@@ -9,7 +9,7 @@ export class MigrationStore {
   async save(record: MigrationRecord): Promise<void> {
     const content = JSON.stringify(record, null, 2);
     const pointer = JSON.stringify({ migrationId: record.migrationId });
-    this.writeChain = this.writeChain.then(async () => {
+    this.writeChain = this.writeChain.catch(() => undefined).then(async () => {
       await this.ensureDirectory();
       await this.app.vault.adapter.write(this.recordPath(record.migrationId), content);
       await this.app.vault.adapter.write(joinVaultPath(this.directory(), "latest.json"), pointer);

@@ -102,6 +102,7 @@ export interface TemplateContext {
   notePath: string;
   index: number;
   hash: string;
+  hashLength?: number;
   now?: Date;
   uuid?: string;
   frontmatter?: Record<string, unknown>;
@@ -157,6 +158,9 @@ export interface AssetManifestItem {
   width?: number;
   height?: number;
   provider: string;
+  bucket?: string;
+  endpoint?: string;
+  publicBaseUrl?: string;
   remotePath: string;
   url: string;
   createdAt: number;
@@ -174,7 +178,7 @@ export interface MigrationItem {
   status: MigrationItemStatus;
   error?: string;
 }
-export interface NoteBackup { notePath: string; content: string; }
+export interface NoteBackup { notePath: string; content: string; after?: string; }
 export interface MigrationRecord {
   migrationId: string;
   createdAt: number;
@@ -198,6 +202,7 @@ export interface PipelineResult {
   filename: string;
   remotePath?: string;
   uploadResult?: UploadResult;
+  destination?: Pick<S3Settings, "bucket" | "endpoint" | "publicBaseUrl">;
   markdownReplacement?: string;
   reused: boolean;
 }

@@ -9,6 +9,7 @@ import { TaskQueue } from "../queue/TaskQueue";
 import { errorMessage } from "../utils/errors";
 import { joinVaultPath } from "../utils/path";
 import { mimeFromName } from "../utils/mime";
+import { canRestoreNote } from "./restoreSafety";
 
 export interface MigrationProgress { completed: number; total: number; success: number; failed: number; current?: string; }
 export interface DryRunItem { sourcePath: string; originalSize: number; processedSize: number; remotePath?: string; referenceCount: number; error?: string; }
@@ -52,6 +53,7 @@ export class MigrationManager {
   }
 
   async migrate(report: ScanReport, notePath?: string, onProgress?: (progress: MigrationProgress) => void): Promise<MigrationRecord> {
+    if (this.activeQueue) throw new Error("已有图片迁移正在运行，请等待其结束。");
     const assets = this.selectAssets(report, notePath);
     const record: MigrationRecord = {
       migrationId: `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
@@ -62,7 +64,8 @@ export class MigrationManager {
 
     const completedAssets: CompletedAsset[] = [];
     let success = 0, failed = 0;
-    this.activeQueue = new TaskQueue(this.getSettings().batch.concurrency);
+    const queue = new TaskQueue(this.getSettings().batch.concurrency);
+    this.activeQueue = queue;
     const tasks = assets.map((asset, index) => async () => {
       const item = record.items[index];
       if (!item) throw new Error("迁移记录损坏。");
@@ -76,7 +79,6 @@ export class MigrationManager {
         const input = await this.readInput(asset.localPath);
         const result = await this.pipeline.execute({ input, note, sourceFile: this.file(asset.localPath), index: index + 1, upload: true });
         item.remoteUrl = result.uploadResult?.url; item.reused = result.reused; item.status = "uploaded";
-        await this.pipeline.commitManifest(result, asset.localPath, asset.references.map(reference => reference.notePath));
         completedAssets.push({ asset, result, item });
         success++;
       } catch (error) {
@@ -85,9 +87,9 @@ export class MigrationManager {
         record.updatedAt = Date.now(); await this.migrations.save(record);
       }
     });
-    await this.activeQueue.run(tasks, progress => onProgress?.({ completed: progress.completed, total: progress.total, success, failed }));
-    const cancelled = this.activeQueue.isCancelled;
-    this.activeQueue = undefined;
+    try { await queue.run(tasks, progress => onProgress?.({ completed: progress.completed, total: progress.total, success, failed })); }
+    finally { this.activeQueue = undefined; }
+    const cancelled = queue.isCancelled;
 
     let transactionCommitted = false;
     try {
@@ -110,12 +112,14 @@ export class MigrationManager {
       await this.migrations.save(record);
       transactionCommitted = true;
     } catch (error) {
-      await this.restoreNotes(record);
       record.status = "failed";
       for (const completed of completedAssets) {
         completed.item.status = "failed";
         completed.item.error = `Markdown 事务已回滚：${errorMessage(error)}`;
       }
+      await this.migrations.save(record);
+      await this.restoreNotes(record);
+      await this.manifest.removeByMigrationUrls(new Set(completedAssets.filter(completed => !completed.result.reused).flatMap(completed => completed.result.uploadResult?.url ? [completed.result.uploadResult.url] : [])));
     }
     if (transactionCommitted && !notePath) {
       try {
@@ -179,9 +183,9 @@ export class MigrationManager {
     for (const [notePath, replacements] of perNote) {
       const note = this.file(notePath);
       const before = await this.app.vault.read(note);
-      record.noteBackups.push({ notePath, content: before });
-      await this.migrations.save(record);
       const after = this.replacer.apply(before, replacements);
+      record.noteBackups.push({ notePath, content: before, after });
+      await this.migrations.save(record);
       await this.app.vault.modify(note, after);
       const verified = await this.app.vault.read(note);
       if (verified !== after) throw new Error(`写入后校验失败：${notePath}`);
@@ -217,10 +221,17 @@ export class MigrationManager {
   }
 
   private async restoreNotes(record: MigrationRecord): Promise<void> {
+    const conflicts: string[] = [];
+    const restorable: Array<{ note: TFile; content: string }> = [];
     for (const backup of record.noteBackups) {
       const note = this.app.vault.getAbstractFileByPath(backup.notePath);
-      if (note instanceof TFile) await this.app.vault.modify(note, backup.content);
+      if (!(note instanceof TFile)) continue;
+      const current = await this.app.vault.read(note);
+      if (!canRestoreNote(current, backup)) { conflicts.push(backup.notePath); continue; }
+      if (current !== backup.content) restorable.push({ note, content: backup.content });
     }
+    if (conflicts.length) throw new Error(`以下笔记在迁移后发生变化，未自动覆盖，请手动核对：${conflicts.join("、")}`);
+    for (const { note, content } of restorable) await this.app.vault.modify(note, content);
   }
 
   private selectAssets(report: ScanReport, notePath?: string): ImageAsset[] {

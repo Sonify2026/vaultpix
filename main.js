@@ -4492,11 +4492,11 @@ var DEFAULT_SETTINGS = {
   autoProcessPaste: true,
   autoProcessDrop: true,
   image: {
-    outputFormat: "webp",
+    outputFormat: "original",
     webpQuality: 82,
     jpegQuality: 85,
     avifQuality: 70,
-    resizeMode: "long-edge",
+    resizeMode: "none",
     resizeWidth: 2560,
     resizeHeight: 2560,
     longEdge: 2560,
@@ -4746,16 +4746,16 @@ var ManifestStore = class {
   }
   async upsert(item) {
     await this.load();
-    const existingIndex = this.data.items.findIndex((candidate) => candidate.id === item.id || candidate.processedHash === item.processedHash);
+    const existingIndex = this.data.items.findIndex((candidate) => candidate.processedHash === item.processedHash && candidate.provider === item.provider && candidate.bucket === item.bucket && candidate.endpoint === item.endpoint && candidate.publicBaseUrl === item.publicBaseUrl);
     if (existingIndex >= 0) {
       const previous = this.data.items[existingIndex];
       if (previous) this.data.items[existingIndex] = { ...previous, ...item, sourcePath: previous.sourcePath, createdAt: previous.createdAt, references: [.../* @__PURE__ */ new Set([...previous.references, ...item.references])] };
     } else this.data.items.push(item);
     await this.save();
   }
-  async findByProcessedHash(hash) {
+  async findByProcessedHash(hash, uploader) {
     await this.load();
-    return this.data.items.find((item) => item.processedHash === hash);
+    return this.data.items.find((item) => item.processedHash === hash && item.provider === uploader.provider && item.bucket === uploader.bucket && item.endpoint === uploader.endpoint && item.publicBaseUrl === uploader.publicBaseUrl);
   }
   async findBySourcePath(path) {
     await this.load();
@@ -4771,7 +4771,7 @@ var ManifestStore = class {
     await this.save();
   }
   async save() {
-    this.writeChain = this.writeChain.then(async () => {
+    this.writeChain = this.writeChain.catch(() => void 0).then(async () => {
       await this.ensureDirectory();
       await this.app.vault.adapter.write(this.filePath(), JSON.stringify(this.data, null, 2));
     });
@@ -4802,7 +4802,7 @@ var MigrationStore = class {
   async save(record) {
     const content = JSON.stringify(record, null, 2);
     const pointer = JSON.stringify({ migrationId: record.migrationId });
-    this.writeChain = this.writeChain.then(async () => {
+    this.writeChain = this.writeChain.catch(() => void 0).then(async () => {
       await this.ensureDirectory();
       await this.app.vault.adapter.write(this.recordPath(record.migrationId), content);
       await this.app.vault.adapter.write(joinVaultPath(this.directory(), "latest.json"), pointer);
@@ -4979,6 +4979,7 @@ var BrowserImageProcessor = class {
       canvas.height = geometry.canvasHeight;
       const context = canvas.getContext("2d", { alpha: true });
       if (!context) throw new ImageAssetError("ENCODE_FAILED" /* ENCODE_FAILED */, "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u521B\u5EFA\u56FE\u7247\u753B\u5E03\u3002");
+      context.imageSmoothingQuality = "high";
       const mimeType = this.outputMime(settings.outputFormat);
       if (mimeType === "image/jpeg") {
         context.fillStyle = "#ffffff";
@@ -4987,7 +4988,7 @@ var BrowserImageProcessor = class {
       context.drawImage(bitmap, geometry.sx, geometry.sy, geometry.sw, geometry.sh, 0, 0, geometry.canvasWidth, geometry.canvasHeight);
       const quality = this.quality(settings);
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
-      if (!blob || settings.outputFormat === "avif" && blob.type !== "image/avif") {
+      if (!blob || blob.type !== mimeType) {
         throw new ImageAssetError("UNSUPPORTED_FORMAT" /* UNSUPPORTED_FORMAT */, `\u5F53\u524D Obsidian/Electron \u73AF\u5883\u4E0D\u652F\u6301\u8F93\u51FA ${settings.outputFormat.toUpperCase()}\u3002`);
       }
       return this.finish(await blob.arrayBuffer(), blob.type || mimeType, canvas.width, canvas.height, input.data.byteLength);
@@ -5064,13 +5065,41 @@ var TemplateEngine = class {
         const value = context.frontmatter?.[frontmatterKey ?? ""];
         return value === void 0 || value === null ? "" : String(value);
       }
-      if (token.startsWith("hash")) return context.hash.slice(0, Number(hashLength || context.hash.length));
+      if (token.startsWith("hash")) return context.hash.slice(0, Number(hashLength || context.hashLength || context.hash.length));
       return values[token] ?? "";
     });
     if (!pathMode) return sanitizePathSegment(rendered, unicode);
     return rendered.split(/[\\/]+/).filter(Boolean).map((part) => sanitizePathSegment(part, unicode)).join("/");
   }
 };
+
+// src/naming/RemoteConflict.ts
+async function resolveRemoteConflict(remotePath, hash, strategy, hashLength, exists) {
+  if (strategy === "overwrite") return remotePath;
+  if (!await exists(remotePath)) return remotePath;
+  if (strategy === "skip") throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, `\u8FDC\u7A0B\u6587\u4EF6\u5DF2\u5B58\u5728\uFF0C\u5DF2\u6309\u8BBE\u7F6E\u8DF3\u8FC7\uFF1A${remotePath}`);
+  const dot = remotePath.lastIndexOf(".");
+  const stem = dot >= 0 ? remotePath.slice(0, dot) : remotePath;
+  const extension = dot >= 0 ? remotePath.slice(dot) : "";
+  if (strategy === "hash") {
+    for (let length = hashLength; length < hash.length; length += 4) {
+      const candidate = `${stem}-${hash.slice(0, Math.min(length, hash.length))}${extension}`;
+      if (!await exists(candidate)) return candidate;
+    }
+    const fullHashCandidate = `${stem}-${hash}${extension}`;
+    if (!await exists(fullHashCandidate)) return fullHashCandidate;
+    for (let index = 2; index <= 999; index++) {
+      const candidate = `${stem}-${hash}-${String(index).padStart(3, "0")}${extension}`;
+      if (!await exists(candidate)) return candidate;
+    }
+  } else {
+    for (let index = 2; index <= 999; index++) {
+      const candidate = `${stem}-${String(index).padStart(3, "0")}${extension}`;
+      if (!await exists(candidate)) return candidate;
+    }
+  }
+  throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, `\u65E0\u6CD5\u4E3A\u8FDC\u7A0B\u8DEF\u5F84\u751F\u6210\u4E0D\u51B2\u7A81\u7684\u6587\u4EF6\u540D\uFF1A${remotePath}`);
+}
 
 // node_modules/@aws-sdk/checksums/dist-es/submodules/flexible-checksums/constants.js
 var RequestChecksumCalculation = {
@@ -19812,6 +19841,26 @@ async function withRetry(operation2, retries, delays = [1e3, 3e3, 1e4]) {
   throw lastError;
 }
 
+// src/queue/KeyedLock.ts
+var KeyedLock = class {
+  pending = /* @__PURE__ */ new Map();
+  async run(key, operation2) {
+    const previous = this.pending.get(key) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.pending.set(key, current);
+    await previous;
+    try {
+      return await operation2();
+    } finally {
+      release();
+      if (this.pending.get(key) === current) this.pending.delete(key);
+    }
+  }
+};
+
 // src/core/pipeline/ImagePipeline.ts
 var ImagePipeline = class {
   constructor(app, getSettings, manifest) {
@@ -19822,8 +19871,21 @@ var ImagePipeline = class {
   processor = new BrowserImageProcessor();
   templates = new TemplateEngine();
   inflightUploads = /* @__PURE__ */ new Map();
+  remotePathLock = new KeyedLock();
   async execute(request) {
-    const settings = this.getSettings();
+    const current = this.getSettings();
+    const settings = {
+      ...current,
+      image: { ...current.image },
+      naming: { ...current.naming },
+      uploader: { ...current.uploader },
+      batch: { ...current.batch }
+    };
+    const destination = {
+      bucket: settings.uploader.bucket,
+      endpoint: settings.uploader.endpoint,
+      publicBaseUrl: settings.uploader.publicBaseUrl
+    };
     const frontmatter = request.note ? this.app.metadataCache.getFileCache(request.note)?.frontmatter : void 0;
     const imageSettings = { ...settings.image };
     if (typeof frontmatter?.["image-format"] === "string" && ["webp", "jpeg", "png", "avif", "original"].includes(frontmatter["image-format"])) {
@@ -19836,40 +19898,56 @@ var ImagePipeline = class {
       imageSettings.avifQuality = quality;
     }
     const processed = await this.processor.process(request.input, imageSettings);
-    const existing = settings.advanced.manifestEnabled ? await this.manifest.findByProcessedHash(processed.hash) : void 0;
-    const context = this.templateContext(request.note, request.input.name, request.index ?? 1, processed.hash, frontmatter);
+    const existing = request.upload && settings.advanced.manifestEnabled ? await this.manifest.findByProcessedHash(processed.hash, settings.uploader) : void 0;
+    const context = this.templateContext(
+      request.note,
+      request.input.name,
+      request.index ?? 1,
+      processed.hash,
+      settings.naming.hashLength,
+      frontmatter
+    );
     const filenameBase = this.templates.render(settings.naming.filenameTemplate, context, false, settings.naming.unicodeFilenames);
     const filename = `${filenameBase}.${processed.format}`;
     const customFolder = typeof frontmatter?.["image-folder"] === "string" ? frontmatter["image-folder"] : "";
     const renderedFolder = customFolder || this.templates.render(settings.naming.remotePathTemplate, context, true, settings.naming.unicodeFilenames);
     let remotePath = joinVaultPath(settings.uploader.pathPrefix, renderedFolder, filename);
-    if (!request.upload) return { input: request.input, processed, filename, remotePath, reused: false };
+    if (!request.upload) return { input: request.input, processed, filename, remotePath, reused: false, destination };
     if (existing?.url) {
       return {
         input: request.input,
         processed,
         filename,
         reused: true,
+        destination,
         remotePath: existing.remotePath,
         uploadResult: { success: true, provider: existing.provider, remotePath: existing.remotePath, url: existing.url }
       };
     }
-    const inflight = this.inflightUploads.get(processed.hash);
+    const uploadIdentity = [
+      settings.uploader.provider,
+      settings.uploader.endpoint,
+      settings.uploader.bucket,
+      settings.uploader.publicBaseUrl,
+      processed.hash
+    ].join("|");
+    const inflight = this.inflightUploads.get(uploadIdentity);
     if (inflight) {
       const shared = await inflight;
-      return { input: request.input, processed, filename, remotePath: shared.remotePath, uploadResult: shared.uploadResult, reused: true };
+      return { input: request.input, processed, filename, remotePath: shared.remotePath, uploadResult: shared.uploadResult, reused: true, destination };
     }
     const operation2 = this.upload(processed.data, processed.mimeType, processed.hash, remotePath, settings);
-    this.inflightUploads.set(processed.hash, operation2);
+    this.inflightUploads.set(uploadIdentity, operation2);
     try {
       const uploaded = await operation2;
-      return { input: request.input, processed, filename, ...uploaded, reused: false };
+      return { input: request.input, processed, filename, ...uploaded, reused: false, destination };
     } finally {
-      this.inflightUploads.delete(processed.hash);
+      this.inflightUploads.delete(uploadIdentity);
     }
   }
   async commitManifest(result, sourcePath, notePaths) {
     if (!result.uploadResult || !this.getSettings().advanced.manifestEnabled) return;
+    if (!result.destination) throw new Error("\u4E0A\u4F20\u7ED3\u679C\u7F3A\u5C11\u76EE\u6807\u5B58\u50A8\u4FE1\u606F\uFF0C\u672A\u8BB0\u5F55\u8D44\u4EA7\u6E05\u5355\u3002");
     const sourceHash = await sha256(result.input.data);
     const now = Date.now();
     const item = {
@@ -19883,6 +19961,9 @@ var ImagePipeline = class {
       width: result.processed.width,
       height: result.processed.height,
       provider: result.uploadResult.provider,
+      bucket: result.destination.bucket,
+      endpoint: result.destination.endpoint,
+      publicBaseUrl: result.destination.publicBaseUrl,
       remotePath: result.uploadResult.remotePath,
       url: result.uploadResult.url,
       createdAt: now,
@@ -19899,7 +19980,7 @@ var ImagePipeline = class {
     }
     return `![${settings.preserveAlt ? alt.replace(/([\\\]])/g, "\\$1") : ""}](${url})`;
   }
-  templateContext(note, inputName, index, hash, frontmatter) {
+  templateContext(note, inputName, index, hash, hashLength, frontmatter) {
     const notePath = note?.path ?? "";
     return {
       noteName: note?.basename ?? this.baseName(inputName).replace(/\.[^.]+$/, ""),
@@ -19909,37 +19990,33 @@ var ImagePipeline = class {
       notePath,
       index,
       hash,
+      hashLength,
       now: /* @__PURE__ */ new Date(),
       uuid: crypto.randomUUID(),
       frontmatter
     };
   }
-  async resolveConflict(remotePath, hash, uploader, settings) {
-    if (settings.naming.conflictStrategy === "overwrite") return remotePath;
-    if (!await uploader.exists(remotePath)) return remotePath;
-    if (settings.naming.conflictStrategy === "skip") throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, `\u8FDC\u7A0B\u6587\u4EF6\u5DF2\u5B58\u5728\uFF0C\u5DF2\u6309\u8BBE\u7F6E\u8DF3\u8FC7\uFF1A${remotePath}`);
-    const dot = remotePath.lastIndexOf(".");
-    const stem = dot >= 0 ? remotePath.slice(0, dot) : remotePath;
-    const extension = dot >= 0 ? remotePath.slice(dot) : "";
-    if (settings.naming.conflictStrategy === "hash") return `${stem}-${hash.slice(0, settings.naming.hashLength)}${extension}`;
-    for (let index = 2; index <= 999; index++) {
-      const candidate = `${stem}-${String(index).padStart(3, "0")}${extension}`;
-      if (!await uploader.exists(candidate)) return candidate;
-    }
-    throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, `\u65E0\u6CD5\u4E3A\u8FDC\u7A0B\u8DEF\u5F84\u751F\u6210\u4E0D\u51B2\u7A81\u7684\u6587\u4EF6\u540D\uFF1A${remotePath}`);
-  }
   async upload(data, mimeType, hash, desiredPath, settings) {
-    const uploader = new S3Uploader(settings.uploader);
-    const remotePath = await this.resolveConflict(desiredPath, hash, uploader, settings);
-    const uploadResult = await withRetry(
-      () => uploader.upload(data, remotePath, { contentType: mimeType, hash }).then((result) => {
-        if (!result.success) throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, result.error || "\u4E0A\u4F20\u670D\u52A1\u8FD4\u56DE\u5931\u8D25\u3002");
-        return result;
-      }),
-      settings.batch.retries
-    );
-    if (settings.batch.verifyUpload) await new UploadVerifier(settings.batch.timeoutMs).verify(uploadResult.url);
-    return { remotePath, uploadResult };
+    const identity = [settings.uploader.provider, settings.uploader.endpoint, settings.uploader.bucket, desiredPath].join("|");
+    return this.remotePathLock.run(identity, async () => {
+      const uploader = new S3Uploader(settings.uploader);
+      const remotePath = await resolveRemoteConflict(
+        desiredPath,
+        hash,
+        settings.naming.conflictStrategy,
+        settings.naming.hashLength,
+        (path) => uploader.exists(path)
+      );
+      const uploadResult = await withRetry(
+        () => uploader.upload(data, remotePath, { contentType: mimeType, hash }).then((result) => {
+          if (!result.success) throw new ImageAssetError("UPLOAD_FAILED" /* UPLOAD_FAILED */, result.error || "\u4E0A\u4F20\u670D\u52A1\u8FD4\u56DE\u5931\u8D25\u3002");
+          return result;
+        }),
+        settings.batch.retries
+      );
+      if (settings.batch.verifyUpload) await new UploadVerifier(settings.batch.timeoutMs).verify(uploadResult.url);
+      return { remotePath, uploadResult };
+    });
   }
   escapeHtml(value) {
     return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -20004,6 +20081,11 @@ var TaskQueue = class {
   }
 };
 
+// src/migration/restoreSafety.ts
+function canRestoreNote(current, backup) {
+  return current === backup.content || backup.after !== void 0 && current === backup.after;
+}
+
 // src/migration/MigrationManager.ts
 var MigrationManager = class {
   constructor(app, getSettings, pipeline, migrations, manifest) {
@@ -20044,6 +20126,7 @@ var MigrationManager = class {
     return output;
   }
   async migrate(report, notePath, onProgress) {
+    if (this.activeQueue) throw new Error("\u5DF2\u6709\u56FE\u7247\u8FC1\u79FB\u6B63\u5728\u8FD0\u884C\uFF0C\u8BF7\u7B49\u5F85\u5176\u7ED3\u675F\u3002");
     const assets = this.selectAssets(report, notePath);
     const record = {
       migrationId: `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
@@ -20057,7 +20140,8 @@ var MigrationManager = class {
     await this.migrations.save(record);
     const completedAssets = [];
     let success = 0, failed = 0;
-    this.activeQueue = new TaskQueue(this.getSettings().batch.concurrency);
+    const queue = new TaskQueue(this.getSettings().batch.concurrency);
+    this.activeQueue = queue;
     const tasks = assets.map((asset, index) => async () => {
       const item = record.items[index];
       if (!item) throw new Error("\u8FC1\u79FB\u8BB0\u5F55\u635F\u574F\u3002");
@@ -20077,7 +20161,6 @@ var MigrationManager = class {
         item.remoteUrl = result.uploadResult?.url;
         item.reused = result.reused;
         item.status = "uploaded";
-        await this.pipeline.commitManifest(result, asset.localPath, asset.references.map((reference) => reference.notePath));
         completedAssets.push({ asset, result, item });
         success++;
       } catch (error) {
@@ -20089,9 +20172,12 @@ var MigrationManager = class {
         await this.migrations.save(record);
       }
     });
-    await this.activeQueue.run(tasks, (progress) => onProgress?.({ completed: progress.completed, total: progress.total, success, failed }));
-    const cancelled = this.activeQueue.isCancelled;
-    this.activeQueue = void 0;
+    try {
+      await queue.run(tasks, (progress) => onProgress?.({ completed: progress.completed, total: progress.total, success, failed }));
+    } finally {
+      this.activeQueue = void 0;
+    }
+    const cancelled = queue.isCancelled;
     let transactionCommitted = false;
     try {
       await this.commitMarkdown(completedAssets, record);
@@ -20113,12 +20199,14 @@ var MigrationManager = class {
       await this.migrations.save(record);
       transactionCommitted = true;
     } catch (error) {
-      await this.restoreNotes(record);
       record.status = "failed";
       for (const completed of completedAssets) {
         completed.item.status = "failed";
         completed.item.error = `Markdown \u4E8B\u52A1\u5DF2\u56DE\u6EDA\uFF1A${errorMessage(error)}`;
       }
+      await this.migrations.save(record);
+      await this.restoreNotes(record);
+      await this.manifest.removeByMigrationUrls(new Set(completedAssets.filter((completed) => !completed.result.reused).flatMap((completed) => completed.result.uploadResult?.url ? [completed.result.uploadResult.url] : [])));
     }
     if (transactionCommitted && !notePath) {
       try {
@@ -20180,9 +20268,9 @@ var MigrationManager = class {
     for (const [notePath, replacements] of perNote) {
       const note = this.file(notePath);
       const before = await this.app.vault.read(note);
-      record.noteBackups.push({ notePath, content: before });
-      await this.migrations.save(record);
       const after = this.replacer.apply(before, replacements);
+      record.noteBackups.push({ notePath, content: before, after });
+      await this.migrations.save(record);
       await this.app.vault.modify(note, after);
       const verified = await this.app.vault.read(note);
       if (verified !== after) throw new Error(`\u5199\u5165\u540E\u6821\u9A8C\u5931\u8D25\uFF1A${notePath}`);
@@ -20217,10 +20305,20 @@ var MigrationManager = class {
     return failed;
   }
   async restoreNotes(record) {
+    const conflicts = [];
+    const restorable = [];
     for (const backup of record.noteBackups) {
       const note = this.app.vault.getAbstractFileByPath(backup.notePath);
-      if (note instanceof import_obsidian3.TFile) await this.app.vault.modify(note, backup.content);
+      if (!(note instanceof import_obsidian3.TFile)) continue;
+      const current = await this.app.vault.read(note);
+      if (!canRestoreNote(current, backup)) {
+        conflicts.push(backup.notePath);
+        continue;
+      }
+      if (current !== backup.content) restorable.push({ note, content: backup.content });
     }
+    if (conflicts.length) throw new Error(`\u4EE5\u4E0B\u7B14\u8BB0\u5728\u8FC1\u79FB\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u672A\u81EA\u52A8\u8986\u76D6\uFF0C\u8BF7\u624B\u52A8\u6838\u5BF9\uFF1A${conflicts.join("\u3001")}`);
+    for (const { note, content } of restorable) await this.app.vault.modify(note, content);
   }
   selectAssets(report, notePath) {
     return [...report.assets.values()].map((asset) => ({
@@ -20332,7 +20430,8 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
       }
       const mode = this.plugin.settings.workMode === "automatic" ? "\u4E91\u7AEF\uFF1A\u4F18\u5316\u3001\u547D\u540D\u5E76\u4E0A\u4F20" : this.plugin.settings.workMode === "semi-automatic" ? "\u672C\u5730\uFF1A\u4EC5\u4F18\u5316\u4E0E\u547D\u540D" : "\u6309\u9700\uFF1A\u4EC5\u8FD0\u884C\u547D\u4EE4";
       const resize = this.plugin.settings.image.resizeMode === "long-edge" ? `\u6700\u957F\u8FB9 ${this.plugin.settings.image.longEdge}px` : this.resizeModeLabel(this.plugin.settings.image.resizeMode);
-      summaryText.setText(`\u5F53\u524D\u6D41\u7A0B\uFF1A${mode} \xB7 ${this.plugin.settings.image.outputFormat.toUpperCase()} \xB7 ${resize}${usesUpload ? ` \xB7 ${this.providerLabel()}` : " \xB7 Obsidian \u672C\u5730\u9644\u4EF6"}`);
+      const imageMode = this.plugin.settings.image.outputFormat === "original" ? "\u4FDD\u7559\u539F\u56FE" : `${this.plugin.settings.image.outputFormat.toUpperCase()} \xB7 ${resize}`;
+      summaryText.setText(`\u5F53\u524D\u6D41\u7A0B\uFF1A${mode} \xB7 ${imageMode}${usesUpload ? ` \xB7 ${this.providerLabel()}` : " \xB7 Obsidian \u672C\u5730\u9644\u4EF6"}`);
     };
     update();
     return update;
@@ -20490,18 +20589,23 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
     }
   }
   renderImageProcessing(refreshSetup) {
-    const content = this.section("\u56FE\u7247\u4F18\u5316", "\u51B3\u5B9A\u8F93\u51FA\u683C\u5F0F\u3001\u753B\u8D28\u4E0E\u5C3A\u5BF8\u3002\u63A8\u8350\u9ED8\u8BA4\u503C\u9002\u5408\u622A\u56FE\u3001\u7167\u7247\u548C\u4E00\u822C\u7B14\u8BB0\u3002", "image", false, this.plugin.settings.image.outputFormat.toUpperCase());
+    const content = this.section("\u56FE\u7247\u4F18\u5316", "\u9ED8\u8BA4\u4FDD\u7559\u539F\u56FE\u50CF\u7D20\u4E0E\u6587\u4EF6\u5B57\u8282\uFF1B\u9700\u8981\u51CF\u5C0F\u4F53\u79EF\u65F6\u518D\u9009\u62E9\u8F6C\u7801\u6216\u7F29\u5C0F\u5C3A\u5BF8\u3002", "image", false, this.plugin.settings.image.outputFormat === "original" ? "\u4FDD\u7559\u539F\u56FE" : this.plugin.settings.image.outputFormat.toUpperCase());
     const note = content.createDiv({ cls: "iam-context-note" });
     const noteIcon = note.createSpan();
     (0, import_obsidian4.setIcon)(noteIcon, "info");
-    note.createSpan({ text: "WebP \u517C\u987E\u4F53\u79EF\u3001\u6E05\u6670\u5EA6\u548C\u900F\u660E\u80CC\u666F\uFF0C\u662F\u6700\u7A33\u59A5\u7684\u9ED8\u8BA4\u9009\u62E9\u3002GIF \u4E0E SVG \u9ED8\u8BA4\u4FDD\u6301\u539F\u683C\u5F0F\u3002" });
+    const qualityNote = note.createSpan();
+    const updateQualityNote = () => {
+      const format2 = this.plugin.settings.image.outputFormat;
+      qualityNote.setText(format2 === "original" ? "\u4FDD\u6301\u539F\u683C\u5F0F\u4F1A\u76F4\u63A5\u590D\u5236\u539F\u56FE\u5B57\u8282\uFF0C\u4E0D\u6267\u884C\u7F29\u653E\u3001\u91CD\u7F16\u7801\u6216\u6E05\u7406\u5143\u6570\u636E\uFF1B\u53EA\u4F1A\u6309\u6A21\u677F\u91CD\u65B0\u547D\u540D\u3002" : format2 === "png" ? "PNG \u7F16\u7801\u672C\u8EAB\u65E0\u635F\uFF0C\u4F46\u5982\u679C\u7F29\u5C0F\u6216\u88C1\u526A\u56FE\u7247\uFF0C\u4ECD\u4F1A\u5931\u53BB\u50CF\u7D20\u7EC6\u8282\u3002" : "WebP\u3001JPEG \u548C AVIF \u4F1A\u6709\u635F\u91CD\u7F16\u7801\uFF1B\u5373\u4F7F\u4E0D\u7F29\u5C0F\u5C3A\u5BF8\uFF0C\u7EC6\u5B57\u4E0E\u8FB9\u7F18\u4E5F\u53EF\u80FD\u53D8\u8F6F\u3002\u9700\u8981\u5B8C\u5168\u4FDD\u771F\u8BF7\u9009\u62E9\u201C\u4FDD\u6301\u539F\u683C\u5F0F\u201D\u3002");
+    };
     const qualityRows = /* @__PURE__ */ new Map();
     const updateQualityRows = () => {
       for (const [format2, row] of qualityRows) row.settingEl.toggle(format2 === this.plugin.settings.image.outputFormat);
-      this.updateSectionMeta(content, this.plugin.settings.image.outputFormat.toUpperCase());
+      this.updateSectionMeta(content, this.plugin.settings.image.outputFormat === "original" ? "\u4FDD\u7559\u539F\u56FE" : this.plugin.settings.image.outputFormat.toUpperCase());
+      updateQualityNote();
       refreshSetup();
     };
-    new import_obsidian4.Setting(content).setName("\u8F93\u51FA\u683C\u5F0F").setDesc("\u4FDD\u6301\u539F\u683C\u5F0F\u4E0D\u4F1A\u91CD\u65B0\u7F16\u7801\uFF0C\u4E5F\u4E0D\u4F1A\u6E05\u7406\u5143\u6570\u636E\u3002AVIF \u662F\u5426\u53EF\u7528\u53D6\u51B3\u4E8E Obsidian/Electron \u7248\u672C\u3002").addDropdown((dropdown) => dropdown.addOptions({ webp: "WebP\uFF08\u63A8\u8350\uFF09", jpeg: "JPEG\uFF08\u7167\u7247\uFF09", png: "PNG\uFF08\u65E0\u635F\uFF09", avif: "AVIF\uFF08\u5B9E\u9A8C\u6027\uFF09", original: "\u4FDD\u6301\u539F\u683C\u5F0F" }).setValue(this.plugin.settings.image.outputFormat).onChange(async (value) => {
+    new import_obsidian4.Setting(content).setName("\u8F93\u51FA\u683C\u5F0F").setDesc("\u4FDD\u6301\u539F\u683C\u5F0F\u6700\u6E05\u6670\uFF1B\u9009\u62E9\u5176\u4ED6\u683C\u5F0F\u624D\u4F1A\u6267\u884C\u4E0B\u65B9\u7684\u5C3A\u5BF8\u8BBE\u7F6E\u3002AVIF \u80FD\u5426\u7F16\u7801\u53D6\u51B3\u4E8E Obsidian \u7248\u672C\u3002").addDropdown((dropdown) => dropdown.addOptions({ original: "\u4FDD\u6301\u539F\u683C\u5F0F\u4E0E\u6E05\u6670\u5EA6\uFF08\u9ED8\u8BA4\uFF09", webp: "WebP\uFF08\u6709\u635F\u538B\u7F29\uFF09", jpeg: "JPEG\uFF08\u6709\u635F\uFF0C\u9002\u5408\u7167\u7247\uFF09", png: "PNG\uFF08\u65E0\u635F\u7F16\u7801\uFF09", avif: "AVIF\uFF08\u6709\u635F\uFF0C\u5B9E\u9A8C\u6027\uFF09" }).setValue(this.plugin.settings.image.outputFormat).onChange(async (value) => {
       await this.persist((s2) => s2.image.outputFormat = value);
       updateQualityRows();
     }));
@@ -20517,7 +20621,7 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
       resizeRows.get("short")?.settingEl.toggle(mode === "short-edge");
       refreshSetup();
     };
-    new import_obsidian4.Setting(content).setName("\u5C3A\u5BF8\u8C03\u6574\u65B9\u5F0F").setDesc("\u6700\u957F\u8FB9\u9002\u5408\u65E5\u5E38\u4F7F\u7528\uFF1BFit \u5B8C\u6574\u4FDD\u7559\u753B\u9762\uFF0CFill \u4F1A\u88C1\u526A\u8FB9\u7F18\u4EE5\u586B\u6EE1\u76EE\u6807\u5C3A\u5BF8\u3002").addDropdown((dropdown) => dropdown.addOptions({ none: "\u4E0D\u8C03\u6574\u5C3A\u5BF8", width: "\u9650\u5236\u5BBD\u5EA6", height: "\u9650\u5236\u9AD8\u5EA6", "long-edge": "\u9650\u5236\u6700\u957F\u8FB9\uFF08\u63A8\u8350\uFF09", "short-edge": "\u9650\u5236\u6700\u77ED\u8FB9", fit: "\u9002\u5E94\u76EE\u6807\u8303\u56F4", fill: "\u586B\u5145\u5E76\u88C1\u526A", fixed: "\u56FA\u5B9A\u5C3A\u5BF8\u5E76\u88C1\u526A" }).setValue(this.plugin.settings.image.resizeMode).onChange(async (value) => {
+    new import_obsidian4.Setting(content).setName("\u5C3A\u5BF8\u8C03\u6574\u65B9\u5F0F").setDesc("\u4EC5\u5728\u8F6C\u6362\u683C\u5F0F\u65F6\u751F\u6548\u3002\u7F29\u5C0F\u4F1A\u51CF\u5C11\u50CF\u7D20\u7EC6\u8282\uFF1BFit \u4FDD\u7559\u5B8C\u6574\u753B\u9762\uFF0CFill \u548C\u56FA\u5B9A\u5C3A\u5BF8\u4F1A\u88C1\u526A\u8FB9\u7F18\u3002").addDropdown((dropdown) => dropdown.addOptions({ none: "\u4E0D\u8C03\u6574\u5C3A\u5BF8", width: "\u9650\u5236\u5BBD\u5EA6", height: "\u9650\u5236\u9AD8\u5EA6", "long-edge": "\u9650\u5236\u6700\u957F\u8FB9\uFF08\u63A8\u8350\uFF09", "short-edge": "\u9650\u5236\u6700\u77ED\u8FB9", fit: "\u9002\u5E94\u76EE\u6807\u8303\u56F4", fill: "\u586B\u5145\u5E76\u88C1\u526A", fixed: "\u56FA\u5B9A\u5C3A\u5BF8\u5E76\u88C1\u526A" }).setValue(this.plugin.settings.image.resizeMode).onChange(async (value) => {
       await this.persist((s2) => s2.image.resizeMode = value);
       updateResizeRows();
     }));
@@ -20547,7 +20651,8 @@ var ImageAssetSettingsTab = class extends import_obsidian4.PluginSettingTab {
         vaultName: this.app.vault.getName(),
         notePath: "\u5DE5\u4F5C/\u9879\u76EE\u590D\u76D8.md",
         index: 1,
-        hash: "9f31a2bc410e7d58",
+        hash: "9f31a2bc410e7d58f61a0b2c3d4e5f6789abcdef0123456789abcdef01234567",
+        hashLength: this.plugin.settings.naming.hashLength,
         now: new Date(2026, 7, 31, 9, 30, 0),
         uuid: "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
         frontmatter: { category: "\u8BBE\u8BA1" }

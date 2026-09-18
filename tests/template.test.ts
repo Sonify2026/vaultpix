@@ -21,4 +21,14 @@ describe("TemplateEngine", () => {
     expect(engine.render("{timestamp}-{uuid}", context)).toBe(`${context.now.getTime()}-stable-uuid`);
     expect(engine.render("{YYYY}/{MM}/{uuid}", context, true)).toBe("2026/08/stable-uuid");
   });
+
+  it("uses the configured hash length when a template omits an explicit length", () => {
+    const context = {
+      noteName: "Note", fileName: "Image", folderName: "Folder", vaultName: "Vault", notePath: "Note.md",
+      index: 1, hash: "abcdef1234567890", hashLength: 8
+    };
+    const engine = new TemplateEngine();
+    expect(engine.render("{hash}", context)).toBe("abcdef12");
+    expect(engine.render("{hash:12}", context)).toBe("abcdef123456");
+  });
 });

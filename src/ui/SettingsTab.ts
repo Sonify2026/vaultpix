@@ -68,7 +68,8 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
       else { status.addClass("is-error"); status.setText("连接测试失败"); }
       const mode = this.plugin.settings.workMode === "automatic" ? "云端：优化、命名并上传" : this.plugin.settings.workMode === "semi-automatic" ? "本地：仅优化与命名" : "按需：仅运行命令";
       const resize = this.plugin.settings.image.resizeMode === "long-edge" ? `最长边 ${this.plugin.settings.image.longEdge}px` : this.resizeModeLabel(this.plugin.settings.image.resizeMode);
-      summaryText.setText(`当前流程：${mode} · ${this.plugin.settings.image.outputFormat.toUpperCase()} · ${resize}${usesUpload ? ` · ${this.providerLabel()}` : " · Obsidian 本地附件"}`);
+      const imageMode = this.plugin.settings.image.outputFormat === "original" ? "保留原图" : `${this.plugin.settings.image.outputFormat.toUpperCase()} · ${resize}`;
+      summaryText.setText(`当前流程：${mode} · ${imageMode}${usesUpload ? ` · ${this.providerLabel()}` : " · Obsidian 本地附件"}`);
     };
     update();
     return update;
@@ -217,18 +218,27 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
   }
 
   private renderImageProcessing(refreshSetup: () => void): void {
-    const content = this.section("图片优化", "决定输出格式、画质与尺寸。推荐默认值适合截图、照片和一般笔记。", "image", false, this.plugin.settings.image.outputFormat.toUpperCase());
+    const content = this.section("图片优化", "默认保留原图像素与文件字节；需要减小体积时再选择转码或缩小尺寸。", "image", false, this.plugin.settings.image.outputFormat === "original" ? "保留原图" : this.plugin.settings.image.outputFormat.toUpperCase());
     const note = content.createDiv({ cls: "iam-context-note" });
     const noteIcon = note.createSpan(); setIcon(noteIcon, "info");
-    note.createSpan({ text: "WebP 兼顾体积、清晰度和透明背景，是最稳妥的默认选择。GIF 与 SVG 默认保持原格式。" });
+    const qualityNote = note.createSpan();
+    const updateQualityNote = (): void => {
+      const format = this.plugin.settings.image.outputFormat;
+      qualityNote.setText(format === "original"
+        ? "保持原格式会直接复制原图字节，不执行缩放、重编码或清理元数据；只会按模板重新命名。"
+        : format === "png"
+          ? "PNG 编码本身无损，但如果缩小或裁剪图片，仍会失去像素细节。"
+          : "WebP、JPEG 和 AVIF 会有损重编码；即使不缩小尺寸，细字与边缘也可能变软。需要完全保真请选择“保持原格式”。");
+    };
     const qualityRows = new Map<OutputFormat, Setting>();
     const updateQualityRows = (): void => {
       for (const [format, row] of qualityRows) row.settingEl.toggle(format === this.plugin.settings.image.outputFormat);
-      this.updateSectionMeta(content, this.plugin.settings.image.outputFormat.toUpperCase());
+      this.updateSectionMeta(content, this.plugin.settings.image.outputFormat === "original" ? "保留原图" : this.plugin.settings.image.outputFormat.toUpperCase());
+      updateQualityNote();
       refreshSetup();
     };
-    new Setting(content).setName("输出格式").setDesc("保持原格式不会重新编码，也不会清理元数据。AVIF 是否可用取决于 Obsidian/Electron 版本。")
-      .addDropdown(dropdown => dropdown.addOptions({ webp: "WebP（推荐）", jpeg: "JPEG（照片）", png: "PNG（无损）", avif: "AVIF（实验性）", original: "保持原格式" }).setValue(this.plugin.settings.image.outputFormat).onChange(async value => {
+    new Setting(content).setName("输出格式").setDesc("保持原格式最清晰；选择其他格式才会执行下方的尺寸设置。AVIF 能否编码取决于 Obsidian 版本。")
+      .addDropdown(dropdown => dropdown.addOptions({ original: "保持原格式与清晰度（默认）", webp: "WebP（有损压缩）", jpeg: "JPEG（有损，适合照片）", png: "PNG（无损编码）", avif: "AVIF（有损，实验性）" }).setValue(this.plugin.settings.image.outputFormat).onChange(async value => {
         await this.persist(s => s.image.outputFormat = value as OutputFormat); updateQualityRows();
       }));
     qualityRows.set("webp", this.slider(content, "WebP 质量", "82 是清晰度与体积的均衡点；提高质量会显著增加文件大小。", this.plugin.settings.image.webpQuality, value => this.persist(s => s.image.webpQuality = value)));
@@ -244,7 +254,7 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
       resizeRows.get("short")?.settingEl.toggle(mode === "short-edge");
       refreshSetup();
     };
-    new Setting(content).setName("尺寸调整方式").setDesc("最长边适合日常使用；Fit 完整保留画面，Fill 会裁剪边缘以填满目标尺寸。")
+    new Setting(content).setName("尺寸调整方式").setDesc("仅在转换格式时生效。缩小会减少像素细节；Fit 保留完整画面，Fill 和固定尺寸会裁剪边缘。")
       .addDropdown(dropdown => dropdown.addOptions({ none: "不调整尺寸", width: "限制宽度", height: "限制高度", "long-edge": "限制最长边（推荐）", "short-edge": "限制最短边", fit: "适应目标范围", fill: "填充并裁剪", fixed: "固定尺寸并裁剪" }).setValue(this.plugin.settings.image.resizeMode).onChange(async value => {
         await this.persist(s => s.image.resizeMode = value as ResizeMode); updateResizeRows();
       }));
@@ -272,7 +282,8 @@ export class ImageAssetSettingsTab extends PluginSettingTab {
     const updatePreview = (): void => {
       const context = {
         noteName: "项目复盘", fileName: "截图", folderName: "工作", vaultName: this.app.vault.getName(), notePath: "工作/项目复盘.md",
-        index: 1, hash: "9f31a2bc410e7d58", now: new Date(2026, 7, 31, 9, 30, 0), uuid: "a1b2c3d4-e5f6-4789-abcd-0123456789ab", frontmatter: { category: "设计" }
+        index: 1, hash: "9f31a2bc410e7d58f61a0b2c3d4e5f6789abcdef0123456789abcdef01234567", hashLength: this.plugin.settings.naming.hashLength,
+        now: new Date(2026, 7, 31, 9, 30, 0), uuid: "a1b2c3d4-e5f6-4789-abcd-0123456789ab", frontmatter: { category: "设计" }
       };
       const extension = this.plugin.settings.image.outputFormat === "original" ? "png" : this.plugin.settings.image.outputFormat;
       const filename = `${this.templates.render(this.plugin.settings.naming.filenameTemplate, context, false, this.plugin.settings.naming.unicodeFilenames)}.${extension}`;
